@@ -1,27 +1,84 @@
 # iRacing data extraction starter
 
+## Run the application
+
+The browser viewer/API and live telemetry extractor are separate processes in this same project. They use the same SQLite database by default, and can run simultaneously. SQLite does not require a separate server. **The frontend currently displays demo sessions; it is not yet connected to your stored recordings.** Real captured data is available through the storage CLI and API.
+
+For a new checkout, install Python 3.11+ and prepare the environment once from the repository directory:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m iracing_storage init
+```
+
+In one PowerShell window, start the viewer:
+
+```powershell
+.\.venv\Scripts\python.exe -m iracing_storage serve
+```
+
+Open `http://127.0.0.1:8765/` in your browser. Keep that PowerShell window running. If the viewer is already running, just open the URL instead of starting another copy.
+
+In a second PowerShell window in the same repository, with the iRacing simulator already open, start extraction:
+
+```powershell
+.\.venv\Scripts\python.exe iracing_local.py
+```
+
+Drive on track to begin capturing. The collector writes SQLite and capture files. Stop either process with Ctrl+C in its own window; stopping the viewer does not stop extraction. The viewer can run without iRacing open, and extraction can run without the viewer.
+
+After a drive, inspect the saved recordings:
+
+```powershell
+.\.venv\Scripts\python.exe -m iracing_storage list
+```
+
+`iracing_client.py` is an optional third command for iRacing's web/account data API; it is not required for live telemetry or the demo viewer. Node.js is only needed to rebuild or test frontend assets during development, not to run this application from source.
+
+## Session Studio frontend
+
+An interactive local frontend mockup is now included. Select a circuit, car and demo session, then use **Summary**, **Analytics** and **Setup** to explore lap pace, compare telemetry and inspect setup snapshots.
+
+```powershell
+.\.venv\Scripts\python.exe -m iracing_storage serve
+```
+
+Open `http://127.0.0.1:8765/`. All displayed sessions and telemetry are clearly labeled synthetic examples; the mockup does not yet read your recordings or write demo data to SQLite. See [the frontend guide](frontend/README.md).
+
+## Local SQL storage
+
+Both extractors now save to SQLite in addition to their existing files. New telemetry fields, arrays and car-specific setup structures can be stored without adding SQL columns. Storage includes capture imports, setup history, SQL analytics views and a read-only frontend API.
+
+```powershell
+.\.venv\Scripts\python.exe -m iracing_storage init
+.\.venv\Scripts\python.exe -m iracing_storage list
+.\.venv\Scripts\python.exe -m iracing_storage serve
+```
+
+The default database is `~\.iracing-app\storage\iracing.sqlite3`. Use `--database` for a different local database or `--no-database` on an extractor for file-only capture. See [the storage guide](STORAGE.md) for setup, imports, endpoints, schema, SQL examples and backups, and [validation results](STORAGE_VALIDATION.md).
+
 ## Setup
 
 1. Create a virtual environment and install dependencies:
 
    ```powershell
    py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   py -m pip install -r requirements.txt
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
    ```
 
-2. Copy `.env.example` to `.env` and set your iRacing credentials. Keep `.env` private.
+2. For web API extraction, set `IRACING_EMAIL` and `IRACING_PASSWORD` in a local `.env` file. Keep `.env` private. Local SDK capture does not need these credentials.
 
 3. Pull a starter response:
 
    ```powershell
-   py iracing_client.py
+   .\.venv\Scripts\python.exe iracing_client.py
    ```
 
 The default request uses `/data/member/info` and writes the response to `data/iracing-response.json`. To try another endpoint from the iRacing data API, pass its path under `/data`:
 
 ```powershell
-py iracing_client.py --endpoint /member/info
+.\.venv\Scripts\python.exe iracing_client.py --endpoint /member/info
 ```
 
 The client hashes the password with SHA-256 and base64-encodes the digest before sending it to iRacing's authentication endpoint. It does not print or store the password.
@@ -49,7 +106,7 @@ Output is written under `data/captures/<UTC session>/`:
 - `stints/stint-0000/car_setup.yaml` and `.json`: the setup captured at stint start and after pit entries (unchanged).
 - `stints/stint-0000/metadata.json`: includes profile ID, version, and field availability for this stint.
 
-The first stint starts immediately. A new stint starts when `OnPitRoad` changes from false to true, creating a new telemetry batch, setup snapshot, and metadata record. Stop with `Ctrl+C`. For a short validation capture, use `--max-ticks 120`.
+The first stint starts when the car is actively on track. A new stint starts when `OnPitRoad` changes from false to true, creating a new telemetry batch, setup snapshot, and metadata record. Stop with `Ctrl+C`. For a short validation capture, use `--max-ticks 120`.
 
 Run offline tests with:
 

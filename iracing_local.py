@@ -12,12 +12,16 @@ import argparse
 import csv
 import json
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import irsdk
 import yaml
+
+from iracing_storage import RecordingWriter, Store, default_database
 
 
 TYPE_NAMES = {0: "char", 1: "bool", 2: "int", 3: "unsigned_int", 4: "float", 5: "double"}
@@ -104,30 +108,46 @@ def parse_yaml_section(raw_yaml: str, section: str) -> Any:
 
 
 class StintWriter:
-    def __init__(self, root: Path, stint_number: int, setup: Any, raw_yaml: str, metadata: dict[str, Any]) -> None:
+    def __init__(self, root: Path, stint_number: int, setup: Any, raw_yaml: str, metadata: dict[str, Any],
+                 storage: RecordingWriter | None = None) -> None:
+        self.storage = storage
+        self.sample_count = 0
         self.directory = root / f"stint-{stint_number:04d}"
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.telemetry = (self.directory / "telemetry.jsonl").open("w", encoding="utf-8")
-        self.session_updates = (self.directory / "session_info_updates.jsonl").open("w", encoding="utf-8")
-        (self.directory / "session_info.yaml").write_text(raw_yaml, encoding="utf-8")
-        setup_raw = extract_yaml_section(raw_yaml, "CarSetup")
-        if setup_raw:
-            (self.directory / "car_setup.yaml").write_text(setup_raw, encoding="utf-8")
-        (self.directory / "car_setup.json").write_text(json.dumps(setup, indent=2, default=str), encoding="utf-8")
-        (self.directory / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+        with ExitStack() as resources:
+            self.telemetry = resources.enter_context((self.directory / "telemetry.jsonl").open("w", encoding="utf-8"))
+            self.session_updates = resources.enter_context((self.directory / "session_info_updates.jsonl").open("w", encoding="utf-8"))
+            (self.directory / "session_info.yaml").write_text(raw_yaml, encoding="utf-8")
+            (self.directory / "initial_session_info.yaml").write_text(raw_yaml, encoding="utf-8")
+            setup_raw = extract_yaml_section(raw_yaml, "CarSetup")
+            if setup_raw:
+                (self.directory / "car_setup.yaml").write_text(setup_raw, encoding="utf-8")
+            (self.directory / "car_setup.json").write_text(json.dumps(setup, indent=2, default=str), encoding="utf-8")
+            (self.directory / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+            if self.storage:
+                self.storage.start_stint(stint_number, metadata, raw_yaml)
+            self.resources = resources.pop_all()
 
     def write_telemetry(self, tick: int, values: dict[str, Any]) -> None:
-        self.telemetry.write(json.dumps({"tick": tick, "captured_at": time.time(), "values": values}, default=str) + "\n")
+        captured_at = time.time()
+        self.telemetry.write(json.dumps({"tick": tick, "captured_at": captured_at, "values": values}, default=str) + "\n")
         self.telemetry.flush()
+        self.sample_count += 1
+        if self.storage:
+            self.storage.write_sample(tick, captured_at, values)
 
     def write_session_update(self, update: int, raw_yaml: str) -> None:
-        self.session_updates.write(json.dumps({"update": update, "raw_yaml": raw_yaml}) + "\n")
+        self.session_updates.write(json.dumps({"update": update, "raw_yaml": raw_yaml,
+                                              "captured_at": time.time(), "before_sample": self.sample_count}) + "\n")
         self.session_updates.flush()
         (self.directory / "session_info.yaml").write_text(raw_yaml, encoding="utf-8")
+        if self.storage:
+            self.storage.session_update(update, raw_yaml)
 
     def close(self) -> None:
-        self.telemetry.close()
-        self.session_updates.close()
+        self.resources.close()
+        if self.storage:
+            self.storage.flush()
 
 
 def enrich_catalog_with_profile(catalog: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -174,7 +194,8 @@ def is_active_driving_session(values: dict[str, Any]) -> bool:
     return is_on_track and is_on_track_car and not in_garage and not on_pit_road
 
 
-def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0, max_ticks: int | None = None) -> None:
+def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0, max_ticks: int | None = None,
+            database: Path | None = None, no_database: bool = False) -> None:
     """Capture live telemetry according to the practice profile.
     
     Args:
@@ -197,7 +218,7 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
     if not ir.is_initialized or not ir.is_connected:
         raise SystemExit("No running iRacing instance was found. Start the simulator first.")
 
-    session_root = root / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    session_root = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + '-' + uuid4().hex[:8])
     catalog = header_catalog(ir)
     catalog = enrich_catalog_with_profile(catalog, profile)
     export_catalog(session_root / "catalog", catalog)
@@ -213,9 +234,24 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
     previous_session_update = -1
     ticks_captured = 0
     active_session_started = False
+    store: Store | None = None
+    storage: RecordingWriter | None = None
+    status = 'completed'
+    manifest: dict[str, Any] = {'format_version': 1, 'started_at': time.time(), 'status': 'recording'}
 
     try:
+        (session_root / 'profile.json').write_text(json.dumps(profile, indent=2), encoding='utf-8')
+        if not no_database:
+            store = Store(database)
+            storage = RecordingWriter(store, profile=profile, catalog=catalog, source_uri=str(session_root.resolve()))
+            manifest['recording_id'] = storage.recording_id
+            print(f'Recording {storage.recording_id} into {store.path}', flush=True)
+        (session_root / 'capture.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         while max_ticks is None or ticks_captured < max_ticks:
+            if storage:
+                storage.flush_if_due()
+            if not ir.is_connected:
+                break
             ir.freeze_var_buffer_latest()
             tick = ir._var_buffer_latest.tick_count
             if tick == previous_tick:
@@ -248,6 +284,7 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
                         "selected_field_count": len(selected_fields),
                         "available_field_count": available_count,
                     },
+                    storage=storage,
                 )
                 stint_number += 1
                 active_session_started = True
@@ -270,6 +307,7 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
                         "selected_field_count": len(selected_fields),
                         "available_field_count": available_count,
                     },
+                    storage=storage,
                 )
                 stint_number += 1
                 previous_pit_state = current_pit_state
@@ -298,10 +336,23 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
             ticks_captured += 1
             if interval:
                 time.sleep(interval)
+    except KeyboardInterrupt:
+        status = 'interrupted'
+    except BaseException:
+        status = 'failed'
+        raise
     finally:
-        if writer:
-            writer.close()
-        ir.shutdown()
+        try:
+            if writer:
+                writer.close()
+            if storage:
+                storage.close(status)
+            manifest.update(status=status, ended_at=time.time())
+            (session_root / 'capture.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+        finally:
+            if store:
+                store.close()
+            ir.shutdown()
 
 
 def main() -> None:
@@ -310,8 +361,11 @@ def main() -> None:
     parser.add_argument("--profile", type=Path, default=Path("practice_profile.json"), help="Telemetry profile JSON.")
     parser.add_argument("--interval", type=float, default=0.0, help="Extra sleep after each captured tick.")
     parser.add_argument("--max-ticks", type=int, help="Stop after this many unique SDK ticks; useful for validation.")
+    parser.add_argument('--database', type=Path, default=default_database(), help='SQLite database path.')
+    parser.add_argument('--no-database', action='store_true', help='Write capture files only.')
     args = parser.parse_args()
-    capture(args.output, profile_path=args.profile, interval=max(0.0, args.interval), max_ticks=args.max_ticks)
+    capture(args.output, profile_path=args.profile, interval=max(0.0, args.interval), max_ticks=args.max_ticks,
+            database=args.database, no_database=args.no_database)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,9 @@
+{
+  "name": "apex-session-studio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/*.test.js"
+  }
+}

@@ -13,6 +13,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+from iracing_storage import Store, default_database
+
 
 class IRacingClient:
     """Authenticated client for the iRacing members data API."""
@@ -81,6 +83,8 @@ def main() -> None:
         default=Path("data/iracing-response.json"),
         help="JSON output path.",
     )
+    parser.add_argument('--database', type=Path, default=default_database(), help='SQLite database path.')
+    parser.add_argument('--no-database', action='store_true', help='Write the JSON response file only.')
     args = parser.parse_args()
 
     email = os.getenv("IRACING_EMAIL")
@@ -93,6 +97,11 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    if not args.no_database:
+        with Store(args.database) as store, store.connection:
+            document_id = store.add_document('iracing_api:' + args.endpoint, data,
+                                             source_uri=str(args.output.resolve()))
+        print(f'Stored response {document_id} in {args.database}')
     print(f"Saved iRacing response to {args.output}")
 
 
