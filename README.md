@@ -2,7 +2,7 @@
 
 ## Run the application
 
-The browser viewer/API and live telemetry extractor are separate processes in this same project. They use the same SQLite database by default, and can run simultaneously. SQLite does not require a separate server. **The frontend currently displays demo sessions; it is not yet connected to your stored recordings.** Real captured data is available through the storage CLI and API.
+The browser viewer/API and live telemetry extractor are separate processes in this same project. They use the same SQLite database by default and can run simultaneously. **The frontend reads real recordings and refreshes automatically while extraction runs.** SQLite does not require a separate database server.
 
 For a new checkout, install Python 3.11+ and prepare the environment once from the repository directory:
 
@@ -18,15 +18,17 @@ In one PowerShell window, start the viewer:
 .\.venv\Scripts\python.exe -m iracing_storage serve
 ```
 
-Open `http://127.0.0.1:8765/` in your browser. Keep that PowerShell window running. If the viewer is already running, just open the URL instead of starting another copy.
+Open `http://127.0.0.1:8765/` in your browser. Keep that PowerShell window running. After updating this code, stop an older viewer with Ctrl+C and restart it. The viewer creates the database if needed and shows an empty state until recordings arrive.
 
-In a second PowerShell window in the same repository, with the iRacing simulator already open, start extraction:
+In a second PowerShell window in the same repository, start extraction:
 
 ```powershell
 .\.venv\Scripts\python.exe iracing_local.py
 ```
 
-Drive on track to begin capturing. The collector writes SQLite and capture files. Stop either process with Ctrl+C in its own window; stopping the viewer does not stop extraction. The viewer can run without iRacing open, and extraction can run without the viewer.
+The extractor waits for the simulator, then begins saving telemetry when you drive on track. It writes SQLite and capture files, and waits for another connection if the simulator closes. The frontend discovers recordings, track/car details, laps and setup snapshots automatically. Updates normally appear within a few seconds (up to roughly one second to commit plus a 1.5-second polling interval and request processing). Garage/menu pauses show the age of the last sample.
+
+Stop either process with Ctrl+C in its own window; stopping the viewer does not stop extraction. The viewer can review saved sessions without iRacing open, and extraction can run without the viewer. Both processes must use the same database path if you override the default with `--database`.
 
 After a drive, inspect the saved recordings:
 
@@ -34,17 +36,17 @@ After a drive, inspect the saved recordings:
 .\.venv\Scripts\python.exe -m iracing_storage list
 ```
 
-`iracing_client.py` is an optional third command for iRacing's web/account data API; it is not required for live telemetry or the demo viewer. Node.js is only needed to rebuild or test frontend assets during development, not to run this application from source.
+`iracing_client.py` is an optional third command for iRacing's web/account data API; it is not required for live telemetry or the session viewer. Node.js is only needed to rebuild or test frontend assets during development, not to run this application from source. If you previously built `frontend/dist`, rebuild it with `node frontend/build.mjs` after updating; the server prefers built assets when present.
 
 ## Session Studio frontend
 
-An interactive local frontend mockup is now included. Select a circuit, car and demo session, then use **Summary**, **Analytics** and **Setup** to explore lap pace, compare telemetry and inspect setup snapshots.
+Select a circuit, car and recording, then use **Summary**, **Analytics** and **Setup** to explore observed lap pace, compare recorded speed/throttle/brake traces and inspect car-specific setup snapshots. Analytics follows the current lap and Setup follows the latest snapshot until you choose a historical item.
 
 ```powershell
 .\.venv\Scripts\python.exe -m iracing_storage serve
 ```
 
-Open `http://127.0.0.1:8765/`. All displayed sessions and telemetry are clearly labeled synthetic examples; the mockup does not yet read your recordings or write demo data to SQLite. See [the frontend guide](frontend/README.md).
+Open `http://127.0.0.1:8765/`. The viewer uses only stored data; missing sensors remain unavailable. Incomplete laps and detected gaps or incidents are labeled, and lap statistics require an observed start and finish. Sector times and optimal laps are not yet calculated. See [the frontend guide](frontend/README.md).
 
 ## Local SQL storage
 
@@ -85,7 +87,7 @@ The client hashes the password with SHA-256 and base64-encodes the digest before
 
 ## Capture the running simulator without login
 
-When the iRacing simulator is open, the local SDK provides live telemetry through shared memory. It does not need your email or password. The collector uses `practice_profile.json` to select which of the 334 available SDK variables to record (default: 130 fields optimized for race engineering analysis):
+When the iRacing simulator is open, the local SDK provides live telemetry through shared memory. It does not need your email or password. The collector uses `practice_profile.json` to select telemetry fields (the default profile contains 130). It also includes the core session, lap, activity and incident fields needed by the viewer, even with a custom profile. The available variable catalog depends on the running simulator:
 
 ```powershell
 .venv\Scripts\python.exe iracing_local.py
@@ -99,8 +101,8 @@ To use a different profile or specify its path:
 
 Output is written under `data/captures/<UTC session>/`:
 
-- `catalog/live_variables.json` and `.csv`: the complete runtime variable catalog (all 334 headers), with excluded fields marked as `excluded_by_profile`.
-- `stints/stint-0000/telemetry.jsonl`: one record per SDK tick with only the selected live variables from the active profile.
+- `catalog/live_variables.json` and `.csv`: the complete runtime variable catalog, with excluded fields marked as `excluded_by_profile`.
+- `stints/stint-0000/telemetry.jsonl`: one record per captured SDK tick with selected profile variables and core viewer fields. Unavailable fields are marked explicitly.
 - `stints/stint-0000/session_info.yaml`: latest complete raw SessionInfo YAML (unchanged).
 - `stints/stint-0000/session_info_updates.jsonl`: every raw SessionInfo update (unchanged).
 - `stints/stint-0000/car_setup.yaml` and `.json`: the setup captured at stint start and after pit entries (unchanged).

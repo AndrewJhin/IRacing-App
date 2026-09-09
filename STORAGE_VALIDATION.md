@@ -1,8 +1,11 @@
-# Storage validation — 2026-09-08
+# Storage and live viewer validation — 2026-09-09
 
 Validated on Windows with Python 3.12.14, SQLite 3.53.1, pyirsdk 1.3.6 and PyYAML 6.0.3.
 
-- `python -m unittest discover -v`: 27 tests passed, including the 6 existing extractor tests.
+- `python -m unittest discover -v`: 37 tests passed, including extractor startup waiting, reconnect orchestration, interruption and bounded capture.
+- `node --test frontend/tests/*.test.js`: 8 tests passed, including live discovery, stable recording selection, stale-response rejection, recovery and missing-value handling.
+- `node frontend/build.mjs`: six public assets built successfully.
+- Viewer HTTP integration: committed telemetry and new setup snapshots appear through the API while a writer remains active; pending samples remain invisible until committed. Lap tests cover observed crossings, delayed timing, partial capture, gaps, incidents, clock resets and unavailable channels. Bounded traces retain speed minima and brake spikes.
 - Crash test: a subprocess exits without closing SQLite; both committed samples survive, the third pending sample is absent, and status does not falsely claim completion.
 - Import tests: rollback after multiple batches and a malformed tail, repeat-import deduplication, source-change detection, and setup associations before/after updates.
 - Actual ephemeral HTTP server: pagination, invalid parameters, missing recordings, read-only behavior, and cross-origin/Host rejection.
@@ -26,4 +29,6 @@ These are storage-only measurements on this machine with synthetic values. They 
 
 ## Remaining simulator check
 
-No real simulator session was available during validation. Run `iracing_local.py` with iRacing open, drive briefly, trigger a pit transition, then stop with Ctrl+C. Use the printed recording ID with `inspect`, `samples` and `snapshots`; verify track, car, setups and observed timing against that session. No real telemetry was inserted by automated validation.
+The updated viewer was started on localhost and its assets and empty production database were read successfully through the actual JavaScript adapter. No example telemetry was added to the application database. Browser interaction and visual testing have not been performed.
+
+No real simulator session was available during validation. Run `iracing_local.py`, open iRacing, complete several laps, trigger a pit transition, then stop with Ctrl+C. Verify the frontend's track, player car, current telemetry, lap timing and setup history against that session. Historical viewing should continue after the collector stops. Tests use temporary databases with synthetic fixtures; actual SDK lap-boundary behavior still needs this on-track check.

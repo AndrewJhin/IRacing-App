@@ -319,6 +319,7 @@ os._exit(9)
         base = f'http://127.0.0.1:{server.server_port}'
         try:
             for path, content_type in [('/', 'text/html'), ('/app.js', 'text/javascript'),
+                                       ('/live.js', 'text/javascript'),
                                        ('/data.js', 'text/javascript'), ('/styles.css', 'text/css'),
                                        ('/favicon.svg', 'image/svg+xml')]:
                 with urlopen(base + path, timeout=3) as response:
@@ -380,10 +381,21 @@ os._exit(9)
                 self.stopped = True
 
         sdk = SDK()
+        sdk.is_initialized = sdk.is_connected = False
+        startup_count = 0
+
+        def startup():
+            nonlocal startup_count
+            startup_count += 1
+            if startup_count == 2:
+                sdk.is_initialized = sdk.is_connected = True
+
+        sdk.startup = startup
         profile = self.root / 'profile.json'
         profile.write_text(encode(PROFILE), encoding='utf-8')
         values = {'IsOnTrack': True, 'IsOnTrackCar': True, 'Speed': 13}
         with patch('iracing_local.irsdk.IRSDK', return_value=sdk), \
+             patch('iracing_local.time.sleep'), \
              patch('iracing_local.header_catalog', return_value=CATALOG), \
              patch('iracing_local.raw_session_info', return_value=RAW_A), \
              patch('iracing_local.read_selected_variables', return_value=(values, [])):
@@ -392,7 +404,11 @@ os._exit(9)
         self.assertEqual(recording['status'], 'completed')
         self.assertEqual(recording['sample_count'], 2)
         self.assertTrue(sdk.stopped)
+        self.assertEqual(startup_count, 2)
         capture_dir = next((self.root / 'captures').iterdir())
+        actual_profile = json.loads((capture_dir / 'profile.json').read_text(encoding='utf-8'))
+        self.assertIn('LapCompleted', actual_profile['selected_fields'])
+        self.assertIn('PlayerCarMyIncidentCount', actual_profile['selected_fields'])
         self.assertEqual(json.loads((capture_dir / 'capture.json').read_text())['status'], 'completed')
         with Store(self.root / 'restored.sqlite3') as restored:
             result = import_capture(restored, capture_dir)

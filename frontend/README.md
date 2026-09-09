@@ -1,43 +1,53 @@
 # Apex — Session Studio
 
-A local, interactive frontend mockup for the iRacing application. It is served by the existing Python backend and uses plain JavaScript modules, CSS and SVG charts. No frontend package installation or external assets are required.
+A local session viewer connected to SQLite through the Python backend. It uses JavaScript modules, CSS and SVG charts, with no frontend package installation or external assets required.
 
 ## Run
 
-From the GitHub checkout, with the existing virtual environment:
+From the repository directory, start the viewer and open `http://127.0.0.1:8765/`:
 
 ```powershell
-.\.venv\Scripts\python.exe -m iracing_storage serve --port 8765
+.\.venv\Scripts\python.exe -m iracing_storage serve
 ```
 
-Open `http://127.0.0.1:8765/`. The backend still exposes its read-only `/api/v1/` routes on the same origin. Only five named frontend assets are served; the project directory, credentials, source Python and database files are not exposed.
+In another PowerShell window in the same directory, start extraction:
 
-## Included interactions
+```powershell
+.\.venv\Scripts\python.exe iracing_local.py
+```
 
-- Circuit, car and session selection: three circuits, three cars, three sessions per combination.
-- Summary: best/optimal/average lap metrics, clean lap progression, lap filtering, sector opportunities and conditions.
-- Lap table: open a specific lap in Analytics.
-- Analytics: selected/reference lap pickers, speed/throttle/brake/delta charts and a shared distance cursor. The slider supports keyboard input; charts also support pointer inspection.
-- Setup: stint snapshot selection, previous-snapshot comparison, changed-value highlighting and parameter structures that differ by car.
-- Keyboard tab navigation, labeled selectors, focus indicators, narrow-screen layouts and reduced-motion support.
+The extractor waits for iRacing and records when you drive on track. Both commands use `~\.iracing-app\storage\iracing.sqlite3` by default. The viewer creates it if needed. For another database, pass the same `--database` path to both commands. Stop each process with Ctrl+C; historical viewing does not require the simulator.
 
-## Data boundary
+Restart the Python viewer after backend updates. If `frontend/dist` exists, rebuild it after frontend updates, then refresh the browser. A fresh checkout serves source assets without needing Node.js.
 
-**Every displayed session, time, trace, condition and setup value is synthetic demo data.** The interface marks this at the top and bottom of every view. Circuit drawings are illustrative schematics, and telemetry is generated for interaction design; neither should be used as an accurate reference for the named real tracks or cars. No telemetry is inserted into SQLite, and no garage changes are made.
+## Live views
 
-This is a frontend mockup, not the production recording adapter. All demo generation is isolated in `data.js`; metrics are calculated from its session model. To connect real data, introduce an adapter over `/api/v1/recordings`, per-recording `snapshots`, `catalog` and paginated `samples`, preserving unavailable values and snapshot provenance. Real lap segmentation and completeness must be established from stored observations before reporting lap/sector results. Do not substitute demo metrics when a real recording is incomplete or empty.
+- Circuit/car filters and a recording library populated from stored session metadata. Load older recordings beyond the first 100; selections use stable recording IDs.
+- Summary: best observed lap, average and consistency, lap history, current telemetry and recorded conditions.
+- Analytics: selected/reference lap pickers, speed/throttle/brake traces and a shared distance cursor. Follow the current lap or select a historical segment.
+- Setup: recorded snapshots, optional following of the latest snapshot, previous-snapshot comparisons and added/removed parameter highlighting. Arbitrary nested car-specific fields retain their recorded values and units.
+- Empty, loading, delayed-history and connection-error states, with automatic retry. No example sessions are substituted for unavailable data.
 
-Setup rendering traverses nested parameters instead of assuming every car has the same fields. It can later receive parsed setup snapshots through that adapter.
+`live.js` polls the same-origin API 1.5 seconds after the previous refresh finishes. Extraction commits at least once per second while its loop is running, or when a sample batch fills. Expect updates within a few seconds under normal load. The interface shows sample age when capture pauses. New recordings are discovered automatically; an already selected recording remains selected.
+
+## Measurement boundaries
+
+Lap segmentation uses recording, stint, simulator session, lap number and clock resets. Statistics require an observed start and finish, a positive SDK last-lap time associated with that lap, and no detected gap, pit/garage activity or incident. The first partially captured lap and unfinished final lap remain visible without contributing to statistics. Incident-channel availability is labeled separately: complete capture does not certify official iRacing lap validity.
+
+Missing channels stay unavailable; zero is a valid measurement. Trace responses contain at most 1,200 representative points by default, retaining bucket endpoints, minimum speed and maximum braking. Gaps and missing channels break chart lines. Cursor values come from nearby observed samples within 1% lap distance, without interpolation. The UI reports only whole-lap time differences between eligible laps; sector times and optimal laps are not calculated.
+
+Setup snapshots reflect observed SDK updates. They do not establish the exact instant a garage change took effect. Legacy imports retain their provenance notices. The viewer never writes telemetry or modifies a car setup. `data.js` and its tests retain the original demo model as development fixtures; the application does not import it.
 
 ## Build and checks
 
-With Node.js installed, run from `frontend/`:
+With Node.js installed, run from the repository directory:
 
 ```powershell
-node --test tests/data.test.js
-node build.mjs
+node --test frontend/tests/*.test.js
+node frontend/build.mjs
+.\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-The build checks JavaScript syntax and local asset references, then copies the five public files into ignored `frontend/dist/`. The server uses the built files when present and otherwise uses source files. After editing, rebuild and refresh the browser. No hosted deployment is needed for this local application.
+The build checks JavaScript syntax and local asset references, then copies six public files into ignored `frontend/dist`. Only explicitly allowed frontend assets are served; credentials, Python source and database files are not exposed. API requests use read-only connections and reject cross-origin access.
 
-The Node tests check all track/car/session combinations, metric arithmetic, timing/telemetry bounds, car-specific setup schemas and time formatting. The Python suite also checks frontend asset serving and rejection of nonpublic paths. Browser interaction/visual testing has not been performed.
+Tests cover committed updates through a real local HTTP server, lap completeness and gaps, delayed SDK timing, telemetry reduction, missing data, adapter retries and stale-response rejection. Browser interaction and real simulator validation remain to be performed.

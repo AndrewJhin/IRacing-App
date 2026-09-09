@@ -1,7 +1,9 @@
 import unittest
+import tempfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from iracing_local import extract_yaml_section, header_catalog, is_active_driving_session, is_pit_entry, load_profile, parse_yaml_section, read_selected_variables
+from iracing_local import capture, main, extract_yaml_section, header_catalog, is_active_driving_session, is_pit_entry, load_profile, parse_yaml_section, read_selected_variables
 
 
 class Header:
@@ -70,6 +72,30 @@ class CollectorTests(unittest.TestCase):
         self.assertFalse(is_active_driving_session({"IsOnTrack": False, "IsOnTrackCar": False, "IsInGarage": True, "OnPitRoad": False}))
         self.assertFalse(is_active_driving_session({"IsOnTrack": False, "IsOnTrackCar": False, "IsInGarage": False, "OnPitRoad": True}))
         self.assertTrue(is_active_driving_session({"IsOnTrack": True, "IsOnTrackCar": True, "IsInGarage": False, "OnPitRoad": False}))
+        self.assertFalse(is_active_driving_session({'IsOnTrack': {'_unavailable': True}, 'IsOnTrackCar': True}))
+
+    def test_waiting_for_simulator_can_be_cancelled_without_a_recording(self):
+        sdk = Mock(is_initialized=False, is_connected=False)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('iracing_local.irsdk.IRSDK', return_value=sdk), \
+             patch('iracing_local.time.sleep', side_effect=KeyboardInterrupt):
+            root = Path(directory) / 'captures'
+            self.assertEqual(capture(root, no_database=True), 'interrupted')
+            self.assertFalse(root.exists())
+        sdk.startup.assert_called_once()
+        self.assertTrue(sdk.shutdown.called)
+
+    def test_command_reconnects_after_disconnect_but_stops_on_interrupt(self):
+        with patch('sys.argv', ['iracing_local.py']), \
+             patch('iracing_local.capture', side_effect=['completed', 'interrupted']) as run:
+            main()
+        self.assertEqual(run.call_count, 2)
+
+    def test_bounded_capture_does_not_restart(self):
+        with patch('sys.argv', ['iracing_local.py', '--max-ticks', '120']), \
+             patch('iracing_local.capture', return_value='completed') as run:
+            main()
+        run.assert_called_once()
 
 
 if __name__ == "__main__":

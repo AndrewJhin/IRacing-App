@@ -184,10 +184,10 @@ def is_active_driving_session(values: dict[str, Any]) -> bool:
     if not isinstance(values, dict):
         return False
 
-    is_on_track = bool(values.get("IsOnTrack", False))
-    is_on_track_car = bool(values.get("IsOnTrackCar", False))
-    in_garage = bool(values.get("IsInGarage", False))
-    on_pit_road = bool(values.get("OnPitRoad", False))
+    is_on_track = values.get("IsOnTrack", False) is True
+    is_on_track_car = values.get("IsOnTrackCar", False) is True
+    in_garage = values.get("IsInGarage", False) is not False
+    on_pit_road = values.get("OnPitRoad", False) is not False
 
     # In the simulator, being in the garage/menu or on pit road is not a live driving state.
     # The session only becomes active once the car is actually on track and not in the garage.
@@ -195,7 +195,7 @@ def is_active_driving_session(values: dict[str, Any]) -> bool:
 
 
 def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0, max_ticks: int | None = None,
-            database: Path | None = None, no_database: bool = False) -> None:
+            database: Path | None = None, no_database: bool = False) -> str:
     """Capture live telemetry according to the practice profile.
     
     Args:
@@ -211,12 +211,27 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
         raise SystemExit(f"Profile not found: {profile_path}")
     
     profile = load_profile(profile_path)
-    selected_fields = profile.get("selected_fields", [])
+    requested_fields = profile.get("selected_fields", [])
+    required_fields = ['IsOnTrack', 'IsOnTrackCar', 'IsInGarage', 'OnPitRoad', 'SessionNum', 'SessionTime',
+                       'Lap', 'LapCompleted', 'LapDistPct', 'LapCurrentLapTime', 'LapLastLapTime', 'PlayerCarMyIncidentCount']
+    selected_fields = list(dict.fromkeys(requested_fields + required_fields))
+    profile = dict(profile, requested_selected_fields=requested_fields, selected_fields=selected_fields,
+                   required_viewer_fields=required_fields)
     
     ir = irsdk.IRSDK()
-    ir.startup()
-    if not ir.is_initialized or not ir.is_connected:
-        raise SystemExit("No running iRacing instance was found. Start the simulator first.")
+    try:
+        ir.startup()
+        waiting = False
+        while not ir.is_initialized or not ir.is_connected:
+            if not waiting:
+                print('Waiting for the iRacing simulator. Ctrl+C stops extraction.', flush=True)
+                waiting = True
+            ir.shutdown()
+            time.sleep(1)
+            ir.startup()
+    except KeyboardInterrupt:
+        ir.shutdown()
+        return 'interrupted'
 
     session_root = root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + '-' + uuid4().hex[:8])
     catalog = header_catalog(ir)
@@ -255,8 +270,7 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
             ir.freeze_var_buffer_latest()
             tick = ir._var_buffer_latest.tick_count
             if tick == previous_tick:
-                if interval:
-                    time.sleep(interval)
+                time.sleep(max(.001, interval))
                 continue
             previous_tick = tick
             values, unavailable = read_selected_variables(ir, catalog, selected_fields)
@@ -353,6 +367,7 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
             if store:
                 store.close()
             ir.shutdown()
+    return status
 
 
 def main() -> None:
@@ -364,8 +379,12 @@ def main() -> None:
     parser.add_argument('--database', type=Path, default=default_database(), help='SQLite database path.')
     parser.add_argument('--no-database', action='store_true', help='Write capture files only.')
     args = parser.parse_args()
-    capture(args.output, profile_path=args.profile, interval=max(0.0, args.interval), max_ticks=args.max_ticks,
-            database=args.database, no_database=args.no_database)
+    while True:
+        result = capture(args.output, profile_path=args.profile, interval=max(0.0, args.interval), max_ticks=args.max_ticks,
+                         database=args.database, no_database=args.no_database)
+        if result == 'interrupted' or args.max_ticks is not None:
+            break
+        print('Simulator disconnected. Waiting for the next session.', flush=True)
 
 
 if __name__ == "__main__":

@@ -98,12 +98,15 @@ Legacy exports lack update timestamps/boundaries and retain only the latest sess
 
 ## Frontend interface
 
-The service listens only on `127.0.0.1:8765`, with a read-only database connection per request. It exposes no SQL execution or mutation endpoint. Use the future frontend's same-origin development/backend proxy; cross-origin browser requests are rejected. This is a local development service, not a remotely hosted production backend.
+The service listens only on `127.0.0.1:8765`, serving the connected session viewer at `/` with a read-only database connection per API request. Startup initializes the database if absent. It exposes no SQL execution or mutation endpoint, and cross-origin browser requests are rejected. This is a local application service, not a remotely hosted production backend.
 
 | GET endpoint | Query parameters |
 | --- | --- |
 | `/api/v1/recordings` | `limit`, `offset` |
+| `/api/v1/library` | `limit`, `offset`; compact recordings with observed track and player car |
 | `/api/v1/recordings/{id}` | None; includes stints |
+| `/api/v1/recordings/{id}/overview` | None; incremental lap aggregates, latest telemetry, identity and coverage |
+| `/api/v1/recordings/{id}/trace` | Required `start`, `end` sample sequences; optional `limit` (40–5,000, default 1,200) |
 | `/api/v1/recordings/{id}/catalog` | None |
 | `/api/v1/recordings/{id}/samples` | `after`, `limit`, `channels`, `stint_id`, `session_num`, `lap`, `time_min`, `time_max` |
 | `/api/v1/recordings/{id}/snapshots` | `after` snapshot ID, `limit` |
@@ -111,7 +114,9 @@ The service listens only on `127.0.0.1:8765`, with a read-only database connecti
 
 Limits range from 1 to 5,000. Sample responses contain `items`, `has_more` and `next_after`. Fetch the next page with `after=next_after`; the cursor is a sample sequence, not an SDK tick. Retain it when polling yields no items. `has_more=false` means no additional committed matching samples at that moment, not that capture finished. Snapshot pagination uses the last returned snapshot ID. Other list responses are wrapped in `items`.
 
-`captured_at` is a UTC Unix timestamp in seconds. `session_time` is the simulation clock in seconds; `lap_distance` is SDK `LapDistPct`, normally a fraction. Filter by `session_num` and `stint_id` to distinguish repeated laps or clocks. `lap` is a simulator lap number, not a global lap ID. Storage does not infer complete laps or interpolate missing samples.
+`captured_at` is a UTC Unix timestamp in seconds. `session_time` is the simulation clock in seconds; `lap_distance` is SDK `LapDistPct`, normally a fraction. Filter by `session_num` and `stint_id` to distinguish repeated laps or clocks. `lap` is a simulator lap number, not a global lap ID. Raw storage does not modify or interpolate measurements.
+
+The viewer projection derives lap segments and conservative completeness from observed boundaries, recorded lap timing and missing/pit/incident checks. It processes up to 25,000 additional samples per overview request, maintaining an in-memory cache of up to eight recordings. `caught_up=false` marks provisional results until history is processed. Cache eviction or server restart recomputes projections from SQLite without modifying source data. Trace responses stream the requested sequence range and return bounded representative points; they are intended for individual laps. See the [frontend guide](frontend/README.md) for measurement boundaries.
 
 ```python
 from iracing_storage import Store
@@ -154,7 +159,7 @@ WHERE recording_id = :recording_id AND stint_id = :stint_id
 ORDER BY sequence;
 ```
 
-JSON views are more expensive than indexed scalar queries. Filter recordings/laps/times and introduce specialized indexes or derived analytics tables once frontend access patterns are known. This version has no downsampling, automatic retention deletion or compressed columnar export. Full-resolution JSON trades disk space for flexible querying.
+JSON views are more expensive than indexed scalar queries. Filter recordings/laps/times and introduce specialized indexes or persistent derived analytics tables as workloads grow. The viewer reduces trace responses for display but retains all stored samples. This version has no automatic retention deletion or compressed columnar export. Full-resolution JSON trades disk space for flexible querying.
 
 ## Durability and backups
 

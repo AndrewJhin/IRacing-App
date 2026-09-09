@@ -1,4 +1,4 @@
-"""Read-only localhost JSON API for a future frontend. No simulator dependencies."""
+"""Local session viewer and read-only JSON API. No simulator dependencies."""
 
 from __future__ import annotations
 
@@ -9,18 +9,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .database import Store, encode
+from .viewer import Viewer, library, trace
 
 
 def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
     # Fail before listening if this is not an initialized application database.
     with Store(database, readonly=True):
         pass
+    viewer = Viewer()
     frontend = Path(__file__).resolve().parents[1] / 'frontend'
     assets = {'/': ('index.html', 'text/html; charset=utf-8'),
               '/index.html': ('index.html', 'text/html; charset=utf-8'),
               '/styles.css': ('styles.css', 'text/css; charset=utf-8'),
               '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
               '/data.js': ('data.js', 'text/javascript; charset=utf-8'),
+              '/live.js': ('live.js', 'text/javascript; charset=utf-8'),
               '/favicon.svg': ('favicon.svg', 'image/svg+xml')}
 
     class Handler(BaseHTTPRequestHandler):
@@ -81,7 +84,10 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
 
             try:
                 with Store(database, readonly=True) as store:
-                    if parts == ['api', 'v1', 'recordings']:
+                    if parts == ['api', 'v1', 'library']:
+                        allowed('limit', 'offset')
+                        body = library(store, limit=get('limit', 100, int), offset=get('offset', 0, int))
+                    elif parts == ['api', 'v1', 'recordings']:
                         allowed('limit', 'offset')
                         body = {'items': store.list_recordings(limit=get('limit', 100, int), offset=get('offset', 0, int))}
                     elif parts == ['api', 'v1', 'documents']:
@@ -93,6 +99,15 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
                         if len(parts) == 4:
                             allowed()
                             body = recording
+                        elif parts[4] == 'overview':
+                            allowed()
+                            body = viewer.overview(store, recording_id)
+                        elif parts[4] == 'trace':
+                            allowed('start', 'end', 'limit')
+                            start, end = get('start', convert=int), get('end', convert=int)
+                            if start is None or end is None:
+                                raise ValueError('start and end are required')
+                            body = trace(store, recording_id, start, end, get('limit', 1200, int))
                         elif parts[4] == 'samples':
                             allowed('after', 'limit', 'channels', 'stint_id', 'session_num', 'lap', 'time_min', 'time_max')
                             channels = get('channels')
@@ -123,6 +138,9 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
 
 
 def serve(database: Path, port: int = 8765) -> None:
+    # The viewer can be launched before the first capture on a fresh installation.
+    with Store(database):
+        pass
     with create_server(database, port) as server:
         print(f'Session Studio: http://127.0.0.1:{server.server_port}/', flush=True)
         print(f'Read-only storage API: http://127.0.0.1:{server.server_port}/api/v1/recordings', flush=True)
