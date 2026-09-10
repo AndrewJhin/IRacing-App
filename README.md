@@ -1,46 +1,41 @@
 # iRacing data extraction starter
 
-## Run the application
+## Run on any Windows PC
 
-The browser viewer/API and live telemetry extractor are separate processes in this same project. They use the same SQLite database by default and can run simultaneously. **The frontend reads real recordings and refreshes automatically while extraction runs.** SQLite does not require a separate database server.
-
-For a new checkout, install Python 3.11+ and prepare the environment once from the repository directory:
+Install Python 3.11 or newer, clone this repository (do not copy another computer's `.venv`), then run from the project directory:
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m iracing_storage init
+py start.py all
 ```
 
-In one PowerShell window, start the viewer:
+The launcher creates `.venv`, installs requirements when needed, initializes SQLite, starts the viewer and recorder, and opens the browser after the viewer is ready. Keep its terminal open; Ctrl+C stops both processes. iRacing must be installed/running on that PC for capture. Viewing saved recordings does not require the simulator.
+
+Use `py start.py setup` to prepare only, `py start.py viewer` for analysis, or `py start.py record` for extraction. `--no-browser` skips opening a browser. `--database 'D:\iRacingData\iracing.sqlite3'` applies the same override to both processes; `--port 8766` changes the viewer port.
+
+Each Windows user's database is `%USERPROFILE%\.iracing-app\storage\iracing.sqlite3`; capture files are in `%USERPROFILE%\.iracing-app\captures`. No account name or project location is hardcoded. Both locations are created automatically. Each PC has its own local data; this does not synchronize recordings between devices. `IRACING_DATABASE` remains available as an override. Use the backup command in STORAGE.md to transfer a consistent database.
+
+The existing VS Code commands still work after setup:
 
 ```powershell
 .\.venv\Scripts\python.exe -m iracing_storage serve
-```
-
-Open `http://127.0.0.1:8765/` in your browser. Keep that PowerShell window running. After updating this code, stop an older viewer with Ctrl+C and restart it. The viewer creates the database if needed and shows an empty state until recordings arrive.
-
-In a second PowerShell window in the same repository, start extraction:
-
-```powershell
 .\.venv\Scripts\python.exe iracing_local.py
 ```
 
-The extractor waits for the simulator, then begins saving telemetry when you drive on track. It writes SQLite and capture files, and waits for another connection if the simulator closes. The frontend discovers recordings, track/car details, laps and setup snapshots automatically. Updates normally appear within a few seconds (up to roughly one second to commit plus a 1.5-second polling interval and request processing). Garage/menu pauses show the age of the last sample.
+Run these in separate terminals. The viewer prints its database path and URL. Profiles resolve relative to the script, so launching from another working directory works. The viewer serves current source assets directly, with no Node build required. Restart the Python viewer/recorder after backend changes.
 
-Stop either process with Ctrl+C in its own window; stopping the viewer does not stop extraction. The viewer can review saved sessions without iRacing open, and extraction can run without the viewer. Both processes must use the same database path if you override the default with `--database`.
+## After-session review
 
-After a drive, inspect the saved recordings:
+Choose a recording date (defaults to today), circuit, car and recording. Full names are shown beneath the selectors and wrap in recording cards. The viewer loads on page refresh and explicit user selections; there is no recurring polling. Long histories finish loading within the same request sequence.
 
-```powershell
-.\.venv\Scripts\python.exe -m iracing_storage list
-```
+Summary shows clean lap best/average, lap history, and estimated sector bests/averages. The sector count and boundaries come from each recording's `SplitTimeInfo.Sectors`. Timing uses linear interpolation only between consecutive, gap-free telemetry samples at those boundaries, plus SDK lap timing at the finish. Only fully observed laps with known incident data, no incidents, no pit visit and no gaps contribute. Missing boundaries/timing remain unavailable; no assumption of three sectors is made.
 
-`iracing_client.py` is an optional third command for iRacing's web/account data API; it is not required for live telemetry or the session viewer. Node.js is only needed to rebuild or test frontend assets during development, not to run this application from source. If you previously built `frontend/dist`, rebuild it with `node frontend/build.mjs` after updating; the server prefers built assets when present.
+Analytics has independent stint and condition filters for selected/reference laps, sector or custom distance zoom, speed/throttle/brake/steering traces, and both gears at the distance cursor. Steering is converted from radians to degrees. Named corner boundaries are not present in the captured session metadata; use a custom distance range to inspect a corner.
+
+A new stint starts on pit exit and ends on pit entry or leaving the car. Starting capture while already driving creates a partial initial stint. A simulator session change also closes the prior stint. Garage/pit ticks never open a stint. The starting setup is captured once per stint and reused by every telemetry sample. Setup review selects a stint and can compare it with the previous stint. Existing recordings are retained and use the earliest setup snapshot of each historical stint; historical stint boundaries are not rewritten.
 
 ## Session Studio frontend
 
-Select a circuit, car and recording, then use **Summary**, **Analytics** and **Setup** to explore observed lap pace, compare recorded speed/throttle/brake traces and inspect car-specific setup snapshots. Analytics follows the current lap and Setup follows the latest snapshot until you choose a historical item.
+Select a circuit, car and recording, then use **Summary**, **Analytics** and **Setup** to explore observed lap pace, compare recorded speed/throttle/brake traces and inspect car-specific setup snapshots. Analytics filters each comparison by stint and condition; Setup selects the starting setup for a stint.
 
 ```powershell
 .\.venv\Scripts\python.exe -m iracing_storage serve
@@ -99,16 +94,16 @@ To use a different profile or specify its path:
 .venv\Scripts\python.exe iracing_local.py --profile path/to/custom_profile.json
 ```
 
-Output is written under `data/captures/<UTC session>/`:
+By default output is written under `%USERPROFILE%/.iracing-app/captures/<UTC session>/`:
 
 - `catalog/live_variables.json` and `.csv`: the complete runtime variable catalog, with excluded fields marked as `excluded_by_profile`.
 - `stints/stint-0000/telemetry.jsonl`: one record per captured SDK tick with selected profile variables and core viewer fields. Unavailable fields are marked explicitly.
-- `stints/stint-0000/session_info.yaml`: latest complete raw SessionInfo YAML (unchanged).
-- `stints/stint-0000/session_info_updates.jsonl`: every raw SessionInfo update (unchanged).
-- `stints/stint-0000/car_setup.yaml` and `.json`: the setup captured at stint start and after pit entries (unchanged).
+- `stints/stint-0000/session_info.yaml`: complete raw SessionInfo YAML at stint start.
+- `stints/stint-0000/session_info_updates.jsonl`: retained as an empty compatibility file; live capture saves YAML only at stint start.
+- `stints/stint-0000/car_setup.yaml` and `.json`: the setup captured once at stint start.
 - `stints/stint-0000/metadata.json`: includes profile ID, version, and field availability for this stint.
 
-The first stint starts when the car is actively on track. A new stint starts when `OnPitRoad` changes from false to true, creating a new telemetry batch, setup snapshot, and metadata record. Stop with `Ctrl+C`. For a short validation capture, use `--max-ticks 120`.
+A stint starts on pit exit (or a partial start if capture begins while already driving). Pit entry or leaving the car closes it; garage/pit states never create a new stint. Stop with `Ctrl+C`. For a short validation capture, use `--max-ticks 120`.
 
 Run offline tests with:
 

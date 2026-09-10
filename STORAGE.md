@@ -185,3 +185,12 @@ The destination must not exist. A successful backup includes committed state. A 
 ```
 
 See [validation results](STORAGE_VALIDATION.md) for coverage, synthetic throughput and the remaining real-simulator check.
+
+
+## Stint capture and Windows startup
+
+`py start.py all` prepares the virtual environment, dependencies and database before launching capture/viewer. Both use `%USERPROFILE%\.iracing-app\storage\iracing.sqlite3` on each PC, unless overridden; local storage is not device synchronization.
+
+New live stints contain only on-track driving outside pit lane/garage. Pit entry or car exit closes the stint; pit exit starts another. One session/setup snapshot is saved at each stint start. Telemetry rows reference that snapshot. The older session-update storage/import APIs remain available to read/import historical capture formats, but live capture no longer calls them every session update. Existing stored data is unchanged.
+
+The viewer is on demand. Library date filtering happens in SQL before pagination using `from` (inclusive) and `until` (exclusive) Unix timestamps. Trace endpoints accept `start_pct`/`end_pct` to load a sector or custom distance range before reducing points. Overview results include `sectors`, lap `sector_seconds`, and `stint_setups` (the earliest snapshot per stint).

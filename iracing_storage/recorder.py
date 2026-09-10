@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from .database import Store, sample_row
+from .database import Store, sample_row, encode
 
 
 class RecordingWriter:
@@ -32,6 +32,14 @@ class RecordingWriter:
             self.stint_id = self.store.add_stint(self.recording_id, number, metadata)
             self.snapshot_id = self.store.add_snapshot(self.recording_id, self.stint_id, raw_yaml,
                                                         captured_at=metadata.get('started_at'))
+
+    def end_stint(self, metadata: dict) -> None:
+        self.flush()
+        if self.stint_id is not None:
+            with self.store.connection:
+                self.store.connection.execute('UPDATE stints SET metadata_json=? WHERE recording_id=? AND id=?',
+                                              (encode(metadata), self.recording_id, self.stint_id))
+        self.stint_id = self.snapshot_id = None
 
     def session_update(self, update: int, raw_yaml: str) -> None:
         if self.closed or self.stint_id is None:

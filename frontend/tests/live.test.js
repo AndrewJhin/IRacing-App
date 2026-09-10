@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {LiveClient,show,lapTime,pathFor,displayTrace,nearest,leaves} from '../live.js';
 
 const recording=id=>({id,track:{id:'track',name:'Recorded circuit'},car:{id:'car',name:'Recorded car'}});
-const overview=id=>({recording:{id},laps:[{id:'0',start_sequence:0,end_sequence:2}],best:null,latest_snapshot_id:1});
+const overview=id=>({recording:{id},laps:[{id:'0',start_sequence:0,end_sequence:2}],best:null,latest_snapshot_id:1,stint_setups:[{id:1,stint_id:1,setup:{Chassis:{Height:'55 mm'}}}]});
 const response=data=>({ok:true,json:async()=>data});
 function service(ids=['one']) {
   return async path=>{
@@ -51,6 +51,27 @@ test('connection errors are explicit and recover without fabricated records',asy
     await client.refresh();assert.equal(client.state.error,'offline');assert.deepEqual(client.state.library,[]);
     fail=false;await client.refresh();assert.equal(client.state.error,null);assert.equal(client.state.recordingId,'one');
   } finally {client.stop();}
+});
+
+test('default browser fetch keeps its global receiver through a complete refresh',async()=>{
+  const originalFetch=globalThis.fetch;
+  const receivers=[];
+  globalThis.fetch=function(path,options) {
+    receivers.push(this);
+    if(this!==globalThis)throw new TypeError('Illegal invocation');
+    return service()(path,options);
+  };
+  const client=new LiveClient(()=>{});
+  try {
+    await client.refresh();
+    assert.equal(client.state.error,null);
+    assert.equal(client.state.overview.recording.id,'one');
+    assert.ok(receivers.length>=3);
+    assert.ok(receivers.every(receiver=>receiver===globalThis));
+  } finally {
+    client.stop();
+    globalThis.fetch=originalFetch;
+  }
 });
 
 test('trace conversion preserves zero and missing values and path breaks',()=>{

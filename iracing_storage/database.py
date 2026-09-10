@@ -67,7 +67,7 @@ def page_limit(limit: int) -> int:
 
 class Store:
     def __init__(self, path: Path | str | None = None, *, readonly: bool = False):
-        self.path = Path(path) if path is not None else default_database()
+        self.path = (Path(path) if path is not None else default_database()).expanduser().resolve()
         if readonly:
             self.connection = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
         else:
@@ -183,11 +183,21 @@ class Store:
                                 (document_id, recording_id, kind, schema_version, time.time(), source_uri, encode(payload)))
         return document_id
 
-    def list_recordings(self, *, limit: int = 100, offset: int = 0) -> list[dict]:
+    def list_recordings(self, *, limit: int = 100, offset: int = 0,
+                        started_from: float | None = None, started_until: float | None = None) -> list[dict]:
         if offset < 0:
             raise ValueError('offset must be nonnegative')
+        clauses, params = [], []
+        for value, operator in ((started_from, '>='), (started_until, '<')):
+            if value is not None:
+                if not math.isfinite(value):
+                    raise ValueError('Invalid date boundary')
+                clauses.append('started_at' + operator + '?')
+                params.append(value)
+        where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
         return [decode_row(row) for row in self.connection.execute(
-            'SELECT * FROM recordings ORDER BY started_at DESC,id LIMIT ? OFFSET ?', (page_limit(limit), offset))]
+            'SELECT * FROM recordings' + where + ' ORDER BY started_at DESC,id LIMIT ? OFFSET ?',
+            (*params, page_limit(limit), offset))]
 
     def recording(self, recording_id: str) -> dict:
         row = self.connection.execute('SELECT * FROM recordings WHERE id=?', (recording_id,)).fetchone()

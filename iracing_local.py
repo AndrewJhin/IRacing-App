@@ -112,6 +112,7 @@ class StintWriter:
                  storage: RecordingWriter | None = None) -> None:
         self.storage = storage
         self.sample_count = 0
+        self.metadata = dict(metadata)
         self.directory = root / f"stint-{stint_number:04d}"
         self.directory.mkdir(parents=True, exist_ok=True)
         with ExitStack() as resources:
@@ -144,7 +145,11 @@ class StintWriter:
         if self.storage:
             self.storage.session_update(update, raw_yaml)
 
-    def close(self) -> None:
+    def close(self, reason: str = 'capture_stopped') -> None:
+        self.metadata.update(ended_at=time.time(), end_reason=reason)
+        (self.directory / 'metadata.json').write_text(json.dumps(self.metadata, indent=2), encoding='utf-8')
+        if self.storage:
+            self.storage.end_stint(self.metadata)
         self.resources.close()
         if self.storage:
             self.storage.flush()
@@ -186,8 +191,8 @@ def is_active_driving_session(values: dict[str, Any]) -> bool:
 
     is_on_track = values.get("IsOnTrack", False) is True
     is_on_track_car = values.get("IsOnTrackCar", False) is True
-    in_garage = values.get("IsInGarage", False) is not False
-    on_pit_road = values.get("OnPitRoad", False) is not False
+    in_garage = values.get("IsInGarage") is not False
+    on_pit_road = values.get("OnPitRoad") is not False
 
     # In the simulator, being in the garage/menu or on pit road is not a live driving state.
     # The session only becomes active once the car is actually on track and not in the garage.
@@ -205,7 +210,7 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
         max_ticks: Stop after this many SDK ticks (None = infinite).
     """
     if profile_path is None:
-        profile_path = Path("practice_profile.json")
+        profile_path = Path(__file__).resolve().with_name("practice_profile.json")
     
     if not profile_path.exists():
         raise SystemExit(f"Profile not found: {profile_path}")
@@ -213,11 +218,16 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
     profile = load_profile(profile_path)
     requested_fields = profile.get("selected_fields", [])
     required_fields = ['IsOnTrack', 'IsOnTrackCar', 'IsInGarage', 'OnPitRoad', 'SessionNum', 'SessionTime',
-                       'Lap', 'LapCompleted', 'LapDistPct', 'LapCurrentLapTime', 'LapLastLapTime', 'PlayerCarMyIncidentCount']
+                       'Lap', 'LapCompleted', 'LapDistPct', 'LapCurrentLapTime', 'LapLastLapTime', 'PlayerCarMyIncidentCount',
+                       'SteeringWheelAngle', 'Gear', 'Speed', 'Throttle', 'Brake']
     selected_fields = list(dict.fromkeys(requested_fields + required_fields))
     profile = dict(profile, requested_selected_fields=requested_fields, selected_fields=selected_fields,
                    required_viewer_fields=required_fields)
     
+    # Validate/create the same user-local database before waiting for the simulator.
+    if not no_database:
+        with Store(database) as initialized:
+            print(f'Database: {initialized.path.resolve()}', flush=True)
     ir = irsdk.IRSDK()
     try:
         ir.startup()
@@ -246,9 +256,8 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
     previous_pit_state = False
     stint_number = 0
     writer: StintWriter | None = None
-    previous_session_update = -1
+    active_session_num = None
     ticks_captured = 0
-    active_session_started = False
     store: Store | None = None
     storage: RecordingWriter | None = None
     status = 'completed'
@@ -275,76 +284,38 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
             previous_tick = tick
             values, unavailable = read_selected_variables(ir, catalog, selected_fields)
             current_pit_state = bool(values.get("OnPitRoad", False)) if not isinstance(values.get("OnPitRoad"), dict) else False
-            session_update = ir.session_info_update
-            raw_yaml = raw_session_info(ir)
 
             driving_active = is_active_driving_session(values)
 
-            # Do not create or write telemetry while the car is in the garage/menu or on pit road.
-            # Only begin capture once we have a genuine live driving state.
-            if not active_session_started and driving_active:
-                setup = parse_yaml_section(raw_yaml, "CarSetup")
-                writer = StintWriter(
-                    session_root / "stints",
-                    stint_number,
-                    setup,
-                    raw_yaml,
-                    {
-                        "tick_rate": tick_rate,
-                        "started_at": time.time(),
-                        "start_reason": "on_track_start",
-                        "profile_id": profile.get("profile_id"),
-                        "profile_version": profile.get("version"),
-                        "selected_field_count": len(selected_fields),
-                        "available_field_count": available_count,
-                    },
-                    storage=storage,
-                )
-                stint_number += 1
-                active_session_started = True
-                previous_pit_state = current_pit_state
-            elif active_session_started and is_pit_entry(previous_pit_state, current_pit_state):
-                if writer:
-                    writer.close()
-                setup = parse_yaml_section(raw_yaml, "CarSetup")
-                writer = StintWriter(
-                    session_root / "stints",
-                    stint_number,
-                    setup,
-                    raw_yaml,
-                    {
-                        "tick_rate": tick_rate,
-                        "started_at": time.time(),
-                        "start_reason": "pit_entry",
-                        "profile_id": profile.get("profile_id"),
-                        "profile_version": profile.get("version"),
-                        "selected_field_count": len(selected_fields),
-                        "available_field_count": available_count,
-                    },
-                    storage=storage,
-                )
-                stint_number += 1
-                previous_pit_state = current_pit_state
-            elif not driving_active:
-                # Garage/menu states are intentionally ignored to avoid inflating data collection.
+            # A stint ends on pit entry or leaving the car. Never open one there.
+            if not driving_active:
                 if writer is not None:
-                    writer.close()
+                    reason = 'pit_entry' if current_pit_state else 'car_exit'
+                    writer.close(reason)
                     writer = None
-                active_session_started = False
                 previous_pit_state = current_pit_state
                 if interval:
                     time.sleep(interval)
                 continue
 
+            session_num = values.get('SessionNum')
+            if writer is not None and session_num != active_session_num:
+                writer.close('session_change')
+                writer = None
             if writer is None:
-                if interval:
-                    time.sleep(interval)
-                continue
-
-            if session_update != previous_session_update:
-                writer.write_session_update(session_update, raw_yaml)
-                previous_session_update = session_update
-
+                raw_yaml = raw_session_info(ir)
+                writer = StintWriter(
+                    session_root / 'stints', stint_number,
+                    parse_yaml_section(raw_yaml, 'CarSetup'), raw_yaml,
+                    {'tick_rate': tick_rate, 'started_at': time.time(),
+                     'start_reason': 'pit_exit' if previous_pit_state else 'capture_started_on_track',
+                     'profile_id': profile.get('profile_id'), 'profile_version': profile.get('version'),
+                     'selected_field_count': len(selected_fields), 'available_field_count': available_count},
+                    storage=storage,
+                )
+                stint_number += 1
+                active_session_num = session_num
+            # Session/setup YAML is captured only at stint start; telemetry references it.
             writer.write_telemetry(tick, values)
             previous_pit_state = current_pit_state
             ticks_captured += 1
@@ -372,8 +343,8 @@ def capture(root: Path, profile_path: Path | None = None, interval: float = 0.0,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Capture iRacing SDK telemetry using the practice profile.")
-    parser.add_argument("--output", type=Path, default=Path("data/captures"), help="Capture root directory.")
-    parser.add_argument("--profile", type=Path, default=Path("practice_profile.json"), help="Telemetry profile JSON.")
+    parser.add_argument("--output", type=Path, default=Path.home() / '.iracing-app' / 'captures', help="Capture root directory.")
+    parser.add_argument("--profile", type=Path, default=Path(__file__).resolve().with_name("practice_profile.json"), help="Telemetry profile JSON.")
     parser.add_argument("--interval", type=float, default=0.0, help="Extra sleep after each captured tick.")
     parser.add_argument("--max-ticks", type=int, help="Stop after this many unique SDK ticks; useful for validation.")
     parser.add_argument('--database', type=Path, default=default_database(), help='SQLite database path.')

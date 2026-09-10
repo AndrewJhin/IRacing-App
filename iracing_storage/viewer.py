@@ -48,8 +48,8 @@ def identity(info):
     }
 
 
-def library(store, limit=100, offset=0):
-    rows = store.list_recordings(limit=limit, offset=offset)
+def library(store, limit=100, offset=0, started_from=None, started_until=None):
+    rows = store.list_recordings(limit=limit, offset=offset, started_from=started_from, started_until=started_until)
     items = []
     for row in rows:
         snapshot = store.connection.execute(
@@ -68,10 +68,25 @@ def is_gap(previous, sample):
             (a is not None and b is not None and (b < a or b - a > .25)))
 
 
+def sector_layout(info):
+    """Use only track-provided SDK boundaries; never assume three sectors."""
+    sectors = object_value(object_value(info).get('SplitTimeInfo')).get('Sectors')
+    if not isinstance(sectors, list) or not sectors:
+        return []
+    if any(not isinstance(s, dict) or number(s.get('SectorStartPct')) is None for s in sectors):
+        return []
+    starts = sorted(s['SectorStartPct'] for s in sectors)
+    if starts[0] != 0 or starts[-1] >= 1 or len(set(starts)) != len(starts):
+        return []
+    return [{'number': i+1, 'start': start, 'end': (starts+[1.0])[i+1]}
+            for i, start in enumerate(starts)]
+
+
 class Accumulator:
     """Only lap aggregates and one previous row stay in memory, not raw telemetry."""
-    def __init__(self):
+    def __init__(self, sectors=None):
         self.sequence = -1
+        self.sectors = sectors or []
         self.previous = None
         self.laps = []
         self.latest = None
@@ -111,13 +126,22 @@ class Accumulator:
                    'start_observed': start_observed, 'complete': False, 'closed': False, 'seconds': None,
                    'finish_observed': False,
                    'gap': False, 'pit': False, 'incident': False, 'incident_known': True,
-                   'incident_end': None, 'elapsed': None}
+                   'incident_end': None, 'elapsed': None, 'sector_crossings': {}}
             self.laps.append(old)
         elif is_gap(previous, sample):
             old['gap'] = True
         if not new_group and previous and number(previous['lap_distance']) is not None and number(sample['lap_distance']) is not None:
             old['gap'] |= sample['lap_distance'] < previous['lap_distance'] - .02
         old['end_sequence'] = sample['sequence']
+        if previous and not new_group and not is_gap(previous, sample):
+            x0, x1 = number(previous['lap_distance']), number(sample['lap_distance'])
+            t0 = number(previous['values'].get('LapCurrentLapTime'))
+            t1 = number(values.get('LapCurrentLapTime'))
+            if all(v is not None for v in (x0, x1, t0, t1)) and 0 <= x0 < x1 <= 1 and 0 <= t0 < t1:
+                for sector in self.sectors[1:]:
+                    boundary = sector['start']
+                    if x0 < boundary <= x1:
+                        old['sector_crossings'][str(sector['number'])] = t0 + (t1-t0)*(boundary-x0)/(x1-x0)
         # Some SDK updates publish the last-lap timing after the crossing tick.
         if len(self.laps) >= 2:
             finished = self.laps[-2]
@@ -152,7 +176,11 @@ class Accumulator:
     def result(self, recording):
         laps = copy.deepcopy(self.laps)
         for lap in laps:
-            lap['eligible'] = bool(lap['complete'] and not lap['gap'] and not lap['pit'] and not lap['incident'])
+            lap['eligible'] = bool(lap['complete'] and lap['incident_known'] and not lap['gap'] and not lap['pit'] and not lap['incident'])
+            boundaries = [0.0] + [lap['sector_crossings'].get(str(s['number'])) for s in self.sectors[1:]] + [lap['seconds']]
+            lap['sector_seconds'] = [b-a if lap['eligible'] and a is not None and b is not None and b > a else None
+                                     for a, b in zip(boundaries, boundaries[1:])] if self.sectors else []
+            lap.pop('sector_crossings', None)
             lap['status'] = ('Pit / garage' if lap['pit'] else 'Incident' if lap['incident'] else 'Data gap' if lap['gap']
                              else 'Complete' if lap['complete'] else 'Partial' if lap['closed']
                              else 'In progress' if recording['status'] == 'recording' else 'Unfinished')
@@ -165,7 +193,12 @@ class Accumulator:
         latest = self.latest
         age = max(0, time.time() - latest['captured_at']) if latest else None
         live_state = ('Receiving telemetry' if age is not None and age < 5 else 'Waiting for telemetry') if recording['status'] == 'recording' else recording['status'].capitalize()
-        return {'laps': laps, 'best': best, 'average': average, 'deviation': deviation,
+        sector_stats = []
+        for i, sector in enumerate(self.sectors):
+            times = [lap['sector_seconds'][i] for lap in eligible if lap['sector_seconds'][i] is not None]
+            sector_stats.append(sector | {'best': min(times) if times else None,
+                                         'average': sum(times)/len(times) if times else None, 'count': len(times)})
+        return {'laps': laps, 'best': best, 'average': average, 'deviation': deviation, 'sectors': sector_stats,
                 'eligible_count': len(eligible), 'processed_count': self.sequence + 1,
                 'caught_up': self.sequence + 1 >= recording['sample_count'],
                 'latest': latest, 'live_state': live_state, 'sample_age_seconds': age,
@@ -183,9 +216,11 @@ class Viewer:
             with store.connection:
                 store.connection.execute('BEGIN')
                 recording = store.recording(recording_id)
+                first_snapshot = store.connection.execute(
+                    'SELECT session_json FROM snapshots WHERE recording_id=? ORDER BY id LIMIT 1', (recording_id,)).fetchone()
                 accumulator = self.cache.get(recording_id)
                 if accumulator is None or accumulator.sequence >= recording['sample_count']:
-                    accumulator = Accumulator()
+                    accumulator = Accumulator(sector_layout(json.loads(first_snapshot[0]) if first_snapshot else None))
                     self.cache[recording_id] = accumulator
                 self.cache.move_to_end(recording_id)
                 while len(self.cache) > 8:
@@ -200,16 +235,31 @@ class Viewer:
                 snapshot = store.connection.execute(
                     'SELECT id,session_json FROM snapshots WHERE recording_id=? ORDER BY id DESC LIMIT 1', (recording_id,)).fetchone()
                 result = accumulator.result(recording)
+                setups = []
+                for row in store.connection.execute(
+                    'SELECT id,stint_id,captured_at,setup_json,parse_error,provenance FROM snapshots '
+                    'WHERE id IN (SELECT min(id) FROM snapshots WHERE recording_id=? GROUP BY stint_id) ORDER BY id',
+                    (recording_id,)):
+                    setup = dict(row)
+                    setup['setup'] = json.loads(setup.pop('setup_json'))
+                    setups.append(setup)
                 return result | {'recording': recording, **identity(json.loads(snapshot['session_json']) if snapshot else None),
+                                 'stint_setups': setups,
                                  'latest_snapshot_id': snapshot['id'] if snapshot else None}
 
 
-def trace(store, recording_id, start, end, limit=1200):
+def trace(store, recording_id, start, end, limit=1200, start_pct=0.0, end_pct=1.0):
     if start < 0 or end < start or not 40 <= limit <= 5000:
         raise ValueError('Invalid trace range or limit')
-    count = store.connection.execute('SELECT count(*) FROM samples WHERE recording_id=? AND sequence>=? AND sequence<=?',
-                                     (recording_id, start, end)).fetchone()[0]
-    bucket_size = max(1, math.ceil(count / (limit // 4)))
+    if not 0 <= start_pct < end_pct <= 1:
+        raise ValueError('Invalid distance range')
+    where = ' WHERE recording_id=? AND sequence>=? AND sequence<=?'
+    params = [recording_id, start, end]
+    if start_pct != 0 or end_pct != 1:
+        where += ' AND lap_distance>=? AND lap_distance<=?'
+        params += [start_pct, end_pct]
+    count = store.connection.execute('SELECT count(*) FROM samples' + where, params).fetchone()[0]
+    bucket_size = max(1, math.ceil(count / (limit // 6)))
     points, bucket, previous, bucket_gap = [], [], None, False
 
     def flush():
@@ -217,25 +267,28 @@ def trace(store, recording_id, start, end, limit=1200):
             return
         speed = [item for item in bucket if item['speed'] is not None]
         brake = [item for item in bucket if item['brake'] is not None]
+        steering = [item for item in bucket if item['steering'] is not None]
         selected = [bucket[0], bucket[-1], min(speed, key=lambda p: p['speed']) if speed else bucket[0],
-                    max(brake, key=lambda p: p['brake']) if brake else bucket[0]]
+                    max(brake, key=lambda p: p['brake']) if brake else bucket[0],
+                    min(steering, key=lambda p: p['steering']) if steering else bucket[0],
+                    max(steering, key=lambda p: p['steering']) if steering else bucket[0]]
         selected = sorted({item['sequence']: item for item in selected}.values(), key=lambda p: p['sequence'])
         for item in selected:
             item['gap'] = bucket_gap
-            for channel in ('speed', 'throttle', 'brake', 'elapsed'):
+            for channel in ('speed', 'throttle', 'brake', 'steering', 'elapsed', 'gear'):
                 if any(point[channel] is None for point in bucket):
                     item[channel] = None
             points.append(item)
 
-    for row in store.connection.execute('SELECT * FROM samples WHERE recording_id=? AND sequence>=? AND sequence<=? ORDER BY sequence',
-                                       (recording_id, start, end)):
+    for row in store.connection.execute('SELECT * FROM samples' + where + ' ORDER BY sequence', params):
         sample = dict(row)
         values = json.loads(sample.pop('values_json'))
         sample['values'] = values
         point = {'sequence': sample['sequence'], 'x': number(sample['lap_distance']),
                  'elapsed': number(values.get('LapCurrentLapTime')), 'speed': number(values.get('Speed')),
                  'throttle': number(values.get('Throttle')), 'brake': number(values.get('Brake')),
-                 'gear': number(values.get('Gear')), 'session_time': number(sample['session_time'])}
+                 'gear': number(values.get('Gear')), 'steering': number(values.get('SteeringWheelAngle')),
+                 'session_time': number(sample['session_time'])}
         bucket_gap |= (is_gap(previous, sample) or point['x'] is None
                        or bool(previous and (previous['lap'] != sample['lap'] or previous['stint_id'] != sample['stint_id']
                                               or previous['session_num'] != sample['session_num'])))

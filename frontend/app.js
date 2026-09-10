@@ -1,145 +1,101 @@
-import { LiveClient, finite, show, lapTime, leaves, pathFor, nearest, displayTrace } from './live.js';
-
+import {LiveClient,finite,show,lapTime,leaves,pathFor,nearest,displayTrace,gearLabel} from './live.js';
 const app=document.querySelector('#app');
-const ui={tab:'summary',filter:'all',cursor:.45,compare:true,deferred:false,dragging:false};
+const ui={tab:'summary',cursor:0,compare:false};
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const icon=name=>`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">${({
-  chart:'<path d="M4 4v16h16M7 14l4-5 4 3 5-8"/>',
-  layers:'<path d="m12 3 10 5-10 5L2 8zM2 12l10 5 10-5M2 16l10 5 10-5"/>',
-  sliders:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',
-  arrow:'<path d="M5 12h14m-5-5 5 5-5 5"/>',
-  flag:'<path d="M5 21V4m0 1c5-5 9 5 14 0v10c-5 5-9-5-14 0"/>',
-  info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/>',
-  database:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>'
-})[name]||'<circle cx="12" cy="12" r="8"/>'}</svg>`;
 const date=value=>finite(value)?new Date(value*1000).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'Date unavailable';
 const clock=value=>finite(value)?new Date(value*1000).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'}):'Time unavailable';
-const lapLabel=lap=>`Lap ${lap.number??'?'} · Stint ${stintNumber(lap.stint_id)} · Session ${lap.session_num??'?'}`;
-const stintNumber=id=>{const stint=client.state.overview?.recording.stints.find(item=>item.id===id);return stint?stint.number+1:id;};
-
-const client=new LiveClient(()=>{
-  // Don't close an open picker or steal the distance slider while polling.
-  if(document.activeElement?.tagName==='SELECT'||ui.dragging){ui.deferred=true;return;}
-  render();
-});
-document.addEventListener('focusout',()=>setTimeout(()=>{if(ui.deferred&&!['SELECT','INPUT'].includes(document.activeElement?.tagName)){ui.deferred=false;render();}},0));
+const client=new LiveClient(()=>render());
 window.addEventListener('pagehide',()=>client.stop());
-window.addEventListener('pointerup',()=>{ui.dragging=false;if(ui.deferred)render();});
-document.addEventListener('change',event=>{if(event.target.tagName==='SELECT')event.target.blur();});
-
-function picker(id,label,items,selected) {
-  return `<label class="picker" for="${id}"><span class="eyebrow">${label}</span><select id="${id}" class="live-picker"><option value="all">All ${label.toLowerCase()}s</option>${items.map(item=>`<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name)}</option>`).join('')}</select></label>`;
+const stintNumber=id=>{const stints=client.state.overview?.recording.stints||[];return stints.find(item=>item.id===id)?.number+1||id;};
+const lapLabel=lap=>`Lap ${lap.number??'?'} · Stint ${stintNumber(lap.stint_id)} · ${lap.status}`;
+const option=(id,label,selected)=>`<option value="${esc(id)}" ${String(id)===String(selected)?'selected':''}>${esc(label)}</option>`;
+const empty=(title,body)=>`<section class="panel empty-panel"><h2>${esc(title)}</h2><p>${esc(body)}</p></section>`;
+const metric=(label,value,note)=>`<article class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}</div><div class="metric-note">${note}</div></article>`;
+function picker(id,label,items,selected){
+ const name=items.find(item=>item.id===selected)?.name||`All ${label.toLowerCase()}s`;
+ return `<label class="picker"><span class="eyebrow">${label}</span><select id="${id}" aria-label="${label}">${option('all',`All ${label.toLowerCase()}s`,selected)}${items.map(item=>option(item.id,item.name,selected)).join('')}</select><span class="selection-name">${esc(name)}</span></label>`;
 }
-function sidebar() {
-  const s=client.state;
-  const tracks=Array.from(new Map(s.library.map(item=>[item.track.id,item.track])).values());
-  const cars=Array.from(new Map(s.library.filter(item=>s.trackId==='all'||item.track.id===s.trackId).map(item=>[item.car.id,item.car])).values());
-  const visible=client.visible();
-  return `<aside class="sidebar"><a class="brand" href="#main"><span class="brand-mark">A</span><span>APEX<small>SESSION STUDIO</small></span></a><div class="library-label">${icon('layers')} Session library</div>
-    <div class="filters">${picker('track-select','Circuit',tracks,s.trackId)}${picker('car-select','Car',cars,s.carId)}</div><div class="sidebar-heading"><span>RECORDINGS</span><span>${visible.length}</span></div>
-    <div class="session-list">${visible.map(item=>`<button class="session-card ${s.recordingId===item.id?'selected':''}" data-recording="${esc(item.id)}" aria-pressed="${s.recordingId===item.id}"><span class="session-date">${esc(date(item.started_at))}<span>${esc(clock(item.started_at))}</span></span><strong>${esc(item.track.name)}</strong><span class="session-car">${esc(item.car.name)}</span><span class="session-bottom"><span>${esc(item.status)}</span><b>${item.sample_count.toLocaleString()} samples</b></span></button>`).join('')||'<p class="sidebar-empty">No recordings in this selection.</p>'}</div>
-    ${s.hasMore?'<button class="text-button" id="load-older">Load older recordings</button>':''}<div class="sidebar-bottom"><div class="storage-status">${icon('database')}<span>Local database<small>${s.error?'Connection interrupted':s.loading?'Refreshing…':'Auto-refresh · 1.5 seconds'}</small></span><span class="status-dot ${s.error?'offline':''}"></span></div></div></aside>`;
+function sidebar(){
+ const s=client.state,tracks=[...new Map(s.library.map(r=>[r.track.id,r.track])).values()];
+ const cars=[...new Map(s.library.filter(r=>s.trackId==='all'||r.track.id===s.trackId).map(r=>[r.car.id,r.car])).values()];
+ return `<aside class="sidebar"><a class="brand" href="#main"><span class="brand-mark">A</span><span>APEX<small>SESSION STUDIO</small></span></a><div class="library-label">Session library</div><div class="filters"><label class="picker"><span class="eyebrow">DATE</span><input id="recording-date" type="date" aria-label="Recording date" value="${s.date}"></label>${picker('track-select','Circuit',tracks,s.trackId)}${picker('car-select','Car',cars,s.carId)}</div><div class="sidebar-heading"><span>RECORDINGS</span><span>${client.visible().length}</span></div><div class="session-list">${client.visible().map(r=>`<button class="session-card ${r.id===s.recordingId?'selected':''}" data-recording="${esc(r.id)}" aria-pressed="${r.id===s.recordingId}"><span class="session-date">${esc(date(r.started_at))}<span>${esc(clock(r.started_at))}</span></span><strong>${esc(r.track.name)}</strong><span class="session-car">${esc(r.car.name)}</span><span class="session-bottom">${esc(r.status)}</span></button>`).join('')||'<p class="sidebar-empty">No recordings for this date and selection.</p>'}</div>${s.hasMore?'<button class="text-button" id="load-older">Load more from this date</button>':''}<div class="sidebar-bottom"><div class="storage-status"><span>Local database<small>${s.error?'Connection interrupted':s.loading?'Loading…':'Refresh page to update'}</small></span><span class="status-dot ${s.error?'offline':''}"></span></div></div></aside>`;
 }
-function empty(title,body) {return `<section class="panel empty-panel">${icon('database')}<h2>${esc(title)}</h2><p>${esc(body)}</p></section>`;}
-function metric(label,value,note,tone='') {return `<article class="metric ${tone}"><div class="metric-label">${label}</div><div class="metric-value">${value}</div><div class="metric-note">${note}</div></article>`;}
-function latestPanel(o) {
-  const latest=o.latest||{};
-  return `<section class="panel"><div class="panel-heading"><h2>Latest telemetry</h2><span class="eyebrow">${o.sample_age_seconds===null?'NO SAMPLES':`${show(o.sample_age_seconds,0)}S AGO`}</span></div><div class="live-values">${[
-    ['Speed',finite(latest.speed)?latest.speed*3.6:null,'km/h'],['Gear',latest.gear,''],['RPM',latest.rpm,''],
-    ['Throttle',finite(latest.throttle)?latest.throttle*100:null,'%'],['Brake',finite(latest.brake)?latest.brake*100:null,'%'],['Fuel',latest.fuel,'L']
-  ].map(([label,value,unit])=>`<div><span>${label}</span><strong>${label==='Gear'&&value===-1?'R':label==='Gear'&&value===0?'N':show(value,label==='Fuel'?1:0)}<small>${unit}</small></strong></div>`).join('')}</div><div class="panel-footnote">${esc(o.live_state)} · Committed samples from extraction</div></section>`;
+function pace(o){
+ const laps=o.laps.filter(lap=>lap.eligible);
+ if(!laps.length)return empty('No clean complete laps','Best and average times require a fully observed lap with known incident data, no incidents, pit visit or telemetry gap.');
+ const min=Math.min(...laps.map(l=>l.seconds))-.25,max=Math.max(...laps.map(l=>l.seconds))+.25;
+ const x=i=>55+i/Math.max(1,laps.length-1)*645,y=v=>170-(v-min)/(max-min)*140;
+ return `<section class="panel pace-panel"><div class="panel-heading"><h2>Clean lap pace</h2></div><svg class="pace-chart" viewBox="0 0 750 225" role="img" aria-label="Clean lap times">${[0,.5,1].map(f=>`<text x="0" y="${y(min+f*(max-min))+4}" class="axis-label">${lapTime(min+f*(max-min))}</text>`).join('')}<polyline points="${laps.map((l,i)=>`${x(i)},${y(l.seconds)}`).join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2"/>${laps.map((l,i)=>`<circle cx="${x(i)}" cy="${y(l.seconds)}" r="4" fill="var(--accent)"><title>${esc(lapLabel(l))}: ${lapTime(l.seconds)}</title></circle>`).join('')}</svg></section>`;
 }
-function pace(o) {
-  const laps=o.laps.filter(lap=>lap.eligible);
-  if(!laps.length)return empty('Waiting for a complete lap','Lap pace appears after an observed start and finish, with no detected pit activity, incident or telemetry gap.');
-  const min=Math.min(...laps.map(lap=>lap.seconds))-.25,max=Math.max(...laps.map(lap=>lap.seconds))+.25;
-  const x=index=>55+index/Math.max(1,laps.length-1)*645,y=value=>170-(value-min)/(max-min)*140;
-  return `<section class="panel pace-panel"><div class="panel-heading"><div><h2>Observed lap pace</h2><p>Complete laps without detected gaps or incidents</p></div></div><svg class="pace-chart" viewBox="0 0 750 225" role="img" aria-label="Observed completed lap times">${[0,1,2,3].map(i=>{const value=min+(max-min)*i/3;return `<line x1="55" x2="710" y1="${y(value)}" y2="${y(value)}" class="chart-grid"/><text x="0" y="${y(value)+4}" class="axis-label">${lapTime(value).slice(0,-1)}</text>`;}).join('')}<polyline points="${laps.map((lap,index)=>`${x(index)},${y(lap.seconds)}`).join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2"/>${laps.map((lap,index)=>`<circle cx="${x(index)}" cy="${y(lap.seconds)}" r="4" fill="var(--accent)"><title>${esc(lapLabel(lap))}: ${lapTime(lap.seconds)}</title></circle>${index%Math.max(1,Math.ceil(laps.length/8))===0?`<text x="${x(index)}" y="205" text-anchor="middle" class="axis-label">${lap.number??'?'}</text>`:''}`).join('')}</svg></section>`;
+function sectors(o){
+ if(!o.sectors?.length)return empty('Sector data unavailable','This recording has no SDK sector boundaries.');
+ return `<section class="panel sector-panel"><div class="panel-heading"><div><h2>Sector pace</h2><p>Estimated times · Clean laps only</p></div></div><div class="table-scroll"><table><thead><tr><th>Sector</th><th>Best</th><th>Average</th><th>Laps</th></tr></thead><tbody>${o.sectors.map(s=>`<tr><td>Sector ${s.number}</td><td class="mono">${lapTime(s.best)}</td><td class="mono">${lapTime(s.average)}</td><td>${s.count}</td></tr>`).join('')}</tbody></table></div><p class="panel-copy">${o.sectors.length} sectors from this track’s SDK metadata. Times estimate the boundary crossing between adjacent telemetry samples.</p></section>`;
 }
-function table(o) {
-  const laps=ui.filter==='complete'?o.laps.filter(lap=>lap.eligible):o.laps;
-  return `<section class="panel lap-panel"><div class="panel-heading"><div><h2>Lap history</h2><p>Unique segments are kept across stints and session resets</p></div><select id="lap-filter" class="small-select" aria-label="Filter laps"><option value="all">All segments</option><option value="complete" ${ui.filter==='complete'?'selected':''}>Complete laps</option></select></div><div class="table-scroll" id="lap-scroll"><table><thead><tr><th>Lap / stint</th><th>Time</th><th>Δ best</th><th>Samples</th><th>Coverage</th><th></th></tr></thead><tbody>${laps.map(lap=>`<tr class="${lap.id===o.best?.id?'best-row':''}"><td><span class="lap-number">${lap.number??'?'}</span> <span class="muted">/ ${stintNumber(lap.stint_id)}</span>${lap.id===o.best?.id?'<span class="best-tag">BEST</span>':''}</td><td class="mono strong">${lapTime(lap.seconds)}${!lap.closed&&finite(lap.elapsed)?`<small class="elapsed-note">${lapTime(lap.elapsed)} elapsed</small>`:''}</td><td class="mono muted">${lap.eligible&&o.best?`+${show(lap.seconds-o.best.seconds,3)}`:'—'}</td><td class="mono">${lap.samples.toLocaleString()}</td><td><span class="lap-status ${lap.eligible?'clean':'other'}">${esc(lap.status)}</span><small class="validity-note">${esc(lap.validity)}</small></td><td><button class="icon-button" data-lap="${lap.id}" aria-label="Analyze ${esc(lapLabel(lap))}">${icon('arrow')}</button></td></tr>`).join('')||'<tr><td colspan="6">No laps recorded yet.</td></tr>'}</tbody></table></div></section>`;
+function conditions(o){
+ return `<section class="panel conditions-panel review-conditions"><div class="panel-heading"><h2>Recorded conditions</h2></div><dl>${[['Circuit length',o.track.length_km,'km'],['Air temperature',o.latest?.air_temp,'°C'],['Track temperature',o.latest?.track_temp,'°C'],['Wind',finite(o.latest?.wind)?o.latest.wind*3.6:null,'km/h']].map(([label,value,unit])=>`<div><dt>${label}</dt><dd>${show(value)} ${unit}</dd></div>`).join('')}</dl></section>`;
 }
-function summary(o) {
-  return `<div class="metric-grid">${metric('Best observed lap',lapTime(o.best?.seconds),o.best?esc(lapLabel(o.best)):'Waiting for a complete lap','highlight')}${metric('Average lap',lapTime(o.average),finite(o.deviation)?`± ${show(o.deviation,3)}s standard deviation`:'Complete laps only')}${metric('Complete laps',o.eligible_count,`${o.laps.length} observed segments`)}${metric('Recorded samples',o.recording.sample_count.toLocaleString(),`${show(o.observed_duration/60,1)} minutes observed`)}</div><div class="summary-grid">${pace(o)}${latestPanel(o)}</div><div class="lower-grid">${table(o)}<div class="summary-side"><section class="panel conditions-panel"><div class="panel-heading"><h2>Recorded conditions</h2></div><dl>${[
-    ['Circuit length',o.track.length_km,'km'],['Air temperature',o.latest?.air_temp,'°C'],['Track temperature',o.latest?.track_temp,'°C'],['Wind',finite(o.latest?.wind)?o.latest.wind*3.6:null,'km/h']
-  ].map(([label,value,unit])=>`<div><dt>${label}</dt><dd>${show(value)} <span>${unit}</span></dd></div>`).join('')}</dl></section><section class="panel"><div class="panel-heading"><h2>Timing coverage</h2></div><p class="panel-copy">Lap times use the recorded SDK lap timing. Missing values remain unavailable. Sector times and an optimal lap are not fabricated from distance or example data.</p><p class="panel-copy">“Complete” describes capture coverage. Incident validity is shown separately when its channel is unavailable.</p></section></div></div>`;
+function summary(o){
+ return `<div class="metric-grid">${metric('Best clean lap',lapTime(o.best?.seconds),o.best?esc(lapLabel(o.best)):'No clean complete laps')}${metric('Average clean lap',lapTime(o.average),finite(o.deviation)?`± ${show(o.deviation,3)}s standard deviation`:'Clean complete laps only')}${metric('Clean complete laps',o.eligible_count,`${o.laps.length} observed lap segments`)}</div><div class="summary-grid">${pace(o)}${sectors(o)}</div>${conditions(o)}<section class="panel lap-panel"><div class="panel-heading"><h2>Lap history</h2></div><div class="table-scroll"><table><thead><tr><th>Lap / stint</th><th>Time</th><th>Δ best</th><th>Coverage</th><th></th></tr></thead><tbody>${o.laps.map(l=>`<tr class="${l.id===o.best?.id?'best-row':''}"><td>${l.number??'?'} / ${stintNumber(l.stint_id)}</td><td class="mono">${lapTime(l.seconds)}</td><td class="mono">${l.eligible&&o.best?'+'+show(l.seconds-o.best.seconds,3):'—'}</td><td><span class="lap-status ${l.eligible?'clean':'other'}">${esc(l.status)}</span><small class="validity-note">${esc(l.validity)}</small></td><td><button class="small-select" data-lap="${l.id}">Analyze</button></td></tr>`).join('')||'<tr><td colspan="5">No laps recorded.</td></tr>'}</tbody></table></div></section>`;
 }
-function lapPicker(id,label,value,o) {
-  return `<label class="lap-picker"><span class="eyebrow">${label}</span><select id="${id}">${o.laps.map(lap=>`<option value="${lap.id}" ${lap.id===value?'selected':''}>${esc(lapLabel(lap))} · ${lapTime(lap.seconds)} · ${esc(lap.status)}</option>`).join('')}</select></label>`;
+function lapPicker(side,label,o){
+ const s=client.state,key=side==='selected'?'lapId':'referenceId',laps=client.laps(side);
+ const stints=o.recording.stints.filter(stint=>o.laps.some(l=>l.stint_id===stint.id));
+ return `<fieldset class="lap-filters"><legend>${label}</legend><div class="lap-filter-row"><label>Stint<select id="${side}-stint" aria-label="${label} stint">${option('all','All stints',s[side+'Stint'])}${stints.map(stint=>option(stint.id,`Stint ${stintNumber(stint.id)}`,s[side+'Stint'])).join('')}</select></label><label>Lap condition<select id="${side}-condition" aria-label="${label} condition">${[['all','All conditions'],['clean','Clean'],['incident','Incident'],['partial','Partial / unfinished'],['gap','Data gap'],['pit','Pit / garage'],['unknown','Incident data unknown']].map(([id,name])=>option(id,name,s[side+'Condition'])).join('')}</select></label></div><label class="lap-picker">Lap<select id="${side}-lap" aria-label="${label}" ${laps.length?'':'disabled'}>${laps.length?laps.map(l=>option(l.id,`${lapLabel(l)} · ${lapTime(l.seconds)}`,s[key])).join(''):'<option>No matching laps</option>'}</select></label></fieldset>`;
 }
-function chart(selected,reference,key,label,unit,max) {
-  return `<div class="trace-block"><div class="trace-heading"><h3>${label}<span>${unit}</span></h3><div class="trace-values"><span class="accent" data-live="${key}">—</span><span class="purple" data-reference="${key}">—</span></div></div><svg class="trace-chart" data-trace="${key}" viewBox="0 0 920 136" role="img" aria-label="Recorded ${label.toLowerCase()} by lap distance">${[0,.5,1].map(f=>`<line x1="54" x2="896" y1="${111-f*94}" y2="${111-f*94}" class="chart-grid"/><text x="12" y="${115-f*94}" class="axis-label">${Math.round(max*f)}</text>`).join('')}${[0,.25,.5,.75,1].map(f=>`<text x="${54+f*842}" y="132" text-anchor="middle" class="axis-label">${f*100}%</text>`).join('')}<path d="${pathFor(reference,key,max)}" fill="none" stroke="var(--purple)" stroke-width="2" stroke-dasharray="5 3"/><path d="${pathFor(selected,key,max)}" fill="none" stroke="var(--accent)" stroke-width="2"/><line class="crosshair" x1="${54+ui.cursor*842}" x2="${54+ui.cursor*842}" y1="17" y2="111" stroke="var(--text)" stroke-opacity=".4" stroke-dasharray="3 4"/></svg></div>`;
+function chart(a,b,key,label,unit,max,min=0){
+ const {rangeStart:start,rangeEnd:end}=client.state;
+ return `<div class="trace-block"><div class="trace-heading"><h3>${label}<span>${unit}</span></h3><div class="trace-values"><span class="accent" data-live="${key}">—</span><span class="purple" data-reference="${key}">—</span></div></div><svg class="trace-chart" data-trace="${key}" viewBox="0 0 920 136" role="img" aria-label="Recorded ${label.toLowerCase()} by lap distance">${[0,.5,1].map(f=>`<line x1="54" x2="896" y1="${111-f*94}" y2="${111-f*94}" class="chart-grid"/><text x="8" y="${115-f*94}" class="axis-label">${Math.round(min+(max-min)*f)}</text>`).join('')}${[0,.25,.5,.75,1].map(f=>`<text x="${54+f*842}" y="132" text-anchor="middle" class="axis-label">${show((start+f*(end-start))*100)}%</text>`).join('')}<path d="${pathFor(b,key,max,min,start,end)}" fill="none" stroke="var(--purple)" stroke-width="2" stroke-dasharray="5 3"/><path d="${pathFor(a,key,max,min,start,end)}" fill="none" stroke="var(--accent)" stroke-width="2"/><line class="crosshair" y1="17" y2="111" stroke="var(--text)" stroke-opacity=".4" stroke-dasharray="3 4"/></svg></div>`;
 }
-function analytics(o) {
-  if(!o.laps.length)return empty('No telemetry yet','Start extraction and drive on track. Live traces will appear as samples are committed.');
-  const s=client.state, selected=displayTrace(s.traces.selected), reference=displayTrace(s.traces.reference);
-  const a=o.laps.find(lap=>lap.id===s.lapId),b=o.laps.find(lap=>lap.id===s.referenceId);
-  const gap=a?.eligible&&b?.eligible?a.seconds-b.seconds:null;
-  const maxSpeed=Math.max(300,...selected.map(p=>finite(p.speed)?p.speed:0),...reference.map(p=>finite(p.speed)?p.speed:0));
-  return `<div class="comparison-toolbar">${lapPicker('selected-lap','Selected lap',s.lapId,o)}${lapPicker('reference-lap','Reference lap',s.referenceId,o)}<label class="compare-toggle"><input type="checkbox" id="follow-lap" ${s.followLap?'checked':''}>Follow current lap</label></div><div class="analytics-grid"><section class="panel telemetry-panel"><div class="panel-heading"><div><h2>Recorded telemetry</h2><p>Lap distance · Gaps remain visible</p></div><div class="trace-legend"><span><i></i> Selected</span><span><i></i> Reference</span></div></div><div class="telemetry-stack">${chart(selected,reference,'speed','Speed','km/h',maxSpeed)}${chart(selected,reference,'throttle','Throttle','%',100)}${chart(selected,reference,'brake','Brake','%',100)}</div><div class="distance-control"><div><label for="distance-cursor">Inspect observed distance</label><output id="distance-value">${show(ui.cursor*100)}%</output></div><input type="range" id="distance-cursor" min="0" max="1000" value="${Math.round(ui.cursor*1000)}" aria-label="Inspect lap distance"><div class="range-labels"><span>0%</span><span>100% OF LAP</span></div></div><div class="panel-footnote">${s.traces.selected?.source_samples?.toLocaleString()||0} source samples in selected segment. Chart reduction preserves representative speed minima and brake maxima. No interpolation across gaps.</div></section><div class="analytics-side">${latestPanel(o)}<section class="panel lap-detail"><div class="panel-heading"><h2>Lap comparison</h2></div><dl><div><dt>Selected time</dt><dd>${lapTime(a?.seconds)}</dd></div><div><dt>Reference time</dt><dd>${lapTime(b?.seconds)}</dd></div><div><dt>Lap time difference</dt><dd>${finite(gap)?`${gap>=0?'+':''}${show(gap,3)}s`:'—'}</dd></div><div><dt>Selected coverage</dt><dd>${esc(a?.status||'Loading')}</dd></div></dl><div class="panel-footnote">A delta is shown only for two eligible complete laps. At the cursor, readouts use nearby recorded samples within 1% of lap distance.</div></section></div></div>`;
+function analytics(o){
+ if(!o.laps.length)return empty('No telemetry yet','Record a stint, then refresh this page.');
+ const s=client.state,a=displayTrace(s.traces.selected),b=displayTrace(s.traces.reference);
+ const selected=o.laps.find(l=>l.id===s.lapId),reference=o.laps.find(l=>l.id===s.referenceId);
+ const gap=selected?.eligible&&reference?.eligible?selected.seconds-reference.seconds:null;
+ const speed=Math.max(100,...[...a,...b].map(p=>p.speed||0)),angle=Math.max(45,...[...a,...b].map(p=>Math.abs(p.steering||0)));
+ return `<div class="comparison-toolbar">${lapPicker('selected','Selected lap',o)}${lapPicker('reference','Reference lap',o)}</div><div class="focus-toolbar"><label>Focus<select id="sector-focus" aria-label="Chart focus">${option('all','Full lap',s.focus)}${(o.sectors||[]).map(sector=>option(sector.number,`Sector ${sector.number}`,s.focus)).join('')}${option('custom','Custom distance range',s.focus)}</select></label>${s.focus==='custom'?`<label>From (%)<input id="range-start" type="number" min="0" max="99.9" step="0.1" value="${show(s.rangeStart*100,1)}"></label><label>To (%)<input id="range-end" type="number" min="0.1" max="100" step="0.1" value="${show(s.rangeEnd*100,1)}"></label><button id="apply-range" class="small-select">Apply range</button>`:''}<span id="range-message">Use a custom range to inspect a corner. Named corner boundaries are unavailable.</span></div><div class="analytics-grid"><section class="panel telemetry-panel"><div class="panel-heading"><div><h2>Lap comparison</h2><p>${show(s.rangeStart*100)}–${show(s.rangeEnd*100)}% of lap distance</p></div><div class="trace-legend"><span><i></i> Selected</span><span><i></i> Reference</span></div></div>${!selected||!reference?'<p class="panel-copy">Choose filters with matching laps to compare both traces.</p>':''}<div class="telemetry-stack">${chart(a,b,'speed','Speed','km/h',speed)}${chart(a,b,'throttle','Throttle','%',100)}${chart(a,b,'brake','Brake','%',100)}${chart(a,b,'steering','Steering angle','°',angle,-angle)}</div><div class="distance-control"><div><label for="distance-cursor">Inspect distance</label><output id="distance-value"></output></div><input type="range" id="distance-cursor" min="0" max="1000" aria-label="Inspect lap distance"><div class="cursor-gears"><span class="accent">Selected gear <strong id="selected-gear">—</strong></span><span class="purple">Reference gear <strong id="reference-gear">—</strong></span></div></div><div class="panel-footnote">Gaps remain visible. Zooming loads telemetry within the selected range. Steering is in degrees; cursor values use nearby recorded samples.</div></section><div class="analytics-side"><section class="panel lap-detail"><div class="panel-heading"><h2>Lap times</h2></div><dl><div><dt>Selected</dt><dd>${lapTime(selected?.seconds)}</dd></div><div><dt>Reference</dt><dd>${lapTime(reference?.seconds)}</dd></div><div><dt>Difference</dt><dd>${finite(gap)?`${gap>=0?'+':''}${show(gap,3)}s`:'—'}</dd></div><div><dt>Selected coverage</dt><dd>${esc(selected?.status||'No matching lap')}</dd></div><div><dt>Reference coverage</dt><dd>${esc(reference?.status||'No matching lap')}</dd></div></dl><p class="panel-copy">Time differences are shown for clean, complete laps.</p></section></div></div>`;
 }
-function setup(o) {
-  const s=client.state,index=s.snapshots.findIndex(item=>item.id===s.snapshotId),snapshot=s.snapshots[index];
-  if(!snapshot)return empty('No setup snapshot yet','Session and setup information will appear after extraction starts a stint.');
-  const previous=s.snapshots[index-1],before=new Map(leaves(previous?.setup).map(item=>[item.path,item.value]));
-  const compare=ui.compare&&!!previous;
-  const rows=(value,prefix=[])=>leaves(value,prefix).map(item=>{const changed=compare&&before.get(item.path)!==item.value;return `<div class="setup-row ${changed?'changed':''}"><dt>${esc(item.path)}</dt><dd>${changed?`<del>${esc(before.get(item.path)??'Not present')}</del>`:''}<span>${esc(item.value)}</span></dd></div>`;}).join('');
-  const setupValue=snapshot.setup;
-  const groups=setupValue&&typeof setupValue==='object'?Object.entries(setupValue):[];
-  const removed=compare?leaves(previous.setup).filter(item=>!new Set(leaves(setupValue).map(row=>row.path)).has(item.path)):[];
-  return `<div class="setup-toolbar"><label><span class="eyebrow">SNAPSHOT</span><select id="setup-snapshot">${s.snapshots.map(item=>`<option value="${item.id}" ${item.id===s.snapshotId?'selected':''}>Stint ${stintNumber(item.stint_id)} · ${esc(clock(item.captured_at))} · #${item.id}</option>`).join('')}</select></label><label class="compare-toggle"><input id="follow-snapshot" type="checkbox" ${s.followSnapshot?'checked':''}>Follow latest</label><label class="compare-toggle"><input id="compare-setup" type="checkbox" ${compare?'checked':''} ${!previous?'disabled':''}>Compare previous snapshot</label></div><div class="setup-overview"><div><h2>${esc(o.car.name)}</h2><p>${esc(date(snapshot.captured_at))} · ${esc(clock(snapshot.captured_at))} · Stint ${stintNumber(snapshot.stint_id)}</p></div><span class="snapshot-badge">Read-only recorded setup</span></div>${snapshot.parse_error?'<div class="notice">Some session YAML could not be parsed. Available setup values are shown below.</div>':''}${snapshot.provenance?.startsWith('legacy')?'<div class="notice">Imported legacy setup: its exact relationship to sample timing may be unknown.</div>':''}${setupValue===null||setupValue===undefined?empty('Car setup not exposed','The SDK did not provide a parsed CarSetup for this snapshot.'):`<div class="setup-sections">${groups.length?groups.map(([name,value])=>`<section class="panel setup-card"><div class="panel-heading"><h2>${esc(name)}</h2></div><dl>${rows(value,[name])}</dl></section>`).join(''):`<section class="panel setup-card"><dl>${rows(setupValue)}</dl></section>`}</div>`}${removed.length?`<section class="panel setup-card"><div class="panel-heading"><h2>No longer present</h2></div><dl>${removed.map(item=>`<div class="setup-row"><dt>${esc(item.path)}</dt><dd><del>${esc(item.value)}</del></dd></div>`).join('')}</dl></section>`:''}<p class="panel-copy">Values and units follow the actual car setup. A snapshot is an SDK observation, not proof of the exact instant a garage change took effect.</p>`;
+function setup(o){
+ const s=client.state,index=s.snapshots.findIndex(item=>item.id===s.snapshotId),snapshot=s.snapshots[index];
+ if(!snapshot)return empty('No setup recorded','A setup is captured once when a stint begins.');
+ const previous=s.snapshots[index-1],compare=ui.compare&&!!previous;
+ const before=new Map(leaves(previous?.setup).map(item=>[item.path,item.value]));
+ const rows=(value,prefix=[])=>leaves(value,prefix).map(item=>{const changed=compare&&before.get(item.path)!==item.value;return `<div class="setup-row ${changed?'changed':''}"><dt>${esc(item.path)}</dt><dd>${changed?`<del>${esc(before.get(item.path)??'Not present')}</del>`:''}<span>${esc(item.value)}</span></dd></div>`;}).join('');
+ const current=new Set(leaves(snapshot.setup).map(item=>item.path)),removed=compare?leaves(previous.setup).filter(item=>!current.has(item.path)):[];
+ const groups=snapshot.setup&&typeof snapshot.setup==='object'?Object.entries(snapshot.setup):[];
+ return `<div class="setup-toolbar"><label><span class="eyebrow">STINT</span><select id="setup-snapshot" aria-label="Setup stint">${s.snapshots.map(item=>option(item.id,`Stint ${stintNumber(item.stint_id)} · ${clock(item.captured_at)} · Starting setup`,s.snapshotId)).join('')}</select></label><label class="compare-toggle"><input id="compare-setup" type="checkbox" ${compare?'checked':''} ${previous?'':'disabled'}>Compare previous stint</label></div><div class="setup-overview"><div><h2>${esc(o.car.name)}</h2><p>${esc(date(snapshot.captured_at))} · Stint ${stintNumber(snapshot.stint_id)}</p></div><span class="snapshot-badge">Setup at stint start</span></div>${snapshot.parse_error?'<div class="notice">Some setup data could not be parsed.</div>':''}${snapshot.setup==null?empty('Setup unavailable','The SDK did not expose a setup at the start of this stint.'):`<div class="setup-sections">${groups.length?groups.map(([name,value])=>`<section class="panel setup-card"><div class="panel-heading"><h2>${esc(name)}</h2></div><dl>${rows(value,[name])}</dl></section>`).join(''):`<section class="panel setup-card"><dl>${rows(snapshot.setup)}</dl></section>`}</div>`}${removed.length?`<section class="panel setup-card"><div class="panel-heading"><h2>No longer present</h2></div><dl>${removed.map(item=>`<div class="setup-row"><dt>${esc(item.path)}</dt><dd><del>${esc(item.value)}</del></dd></div>`).join('')}</dl></section>`:''}<p class="panel-copy">One starting setup per stint. Historical recordings use the earliest stored snapshot for each stint. Values and units follow the recorded car setup.</p>`;
 }
-function render() {
-  ui.deferred=false;
-  const s=client.state,o=s.overview;
-  const focus=document.activeElement?.id;
-  const scroll=document.querySelector('#lap-scroll')?.scrollTop;
-  const libraryScroll=document.querySelector('.sidebar')?.scrollTop;
-  const status=s.error?'CONNECTION INTERRUPTED':o?o.live_state.toUpperCase():s.loading?'CONNECTING':'LOCAL DATABASE';
-  app.innerHTML=`${sidebar()}<main id="main" tabindex="-1"><header class="topbar"><div class="breadcrumb">WORKSPACE <span>Session review</span></div><span class="demo-badge ${s.error?'error-badge':''}"><span></span>${esc(status)}</span></header><div class="main-content">${s.error?`<div class="notice" role="status">${icon('info')}${esc(s.error)} Last loaded values may be stale.<button id="retry" class="small-select">Retry now</button></div>`:''}${o?`<div class="session-header"><div><div class="eyebrow session-kicker">${esc(date(o.recording.started_at))} · ${esc(clock(o.recording.started_at))} · ${esc(o.recording.status)}</div><h1>${esc(o.track.name)}${o.track.layout?`<span class="layout-tag">${esc(o.track.layout)}</span>`:''}</h1><div class="car-subtitle">${esc(o.car.name)} <span class="header-separator">/</span> ${esc(o.track.country)}</div></div></div><div class="tabbar"><div role="tablist" aria-label="Session views">${['summary','analytics','setup'].map(tab=>`<button id="tab-${tab}" class="tab ${ui.tab===tab?'active':''}" role="tab" aria-selected="${ui.tab===tab}" aria-controls="session-panel" tabindex="${ui.tab===tab?0:-1}" data-tab="${tab}">${icon(tab==='setup'?'sliders':tab==='analytics'?'chart':'layers')}${tab[0].toUpperCase()+tab.slice(1)}</button>`).join('')}</div><span class="preview-label">Recorded data · Auto-refresh</span></div>${!o.caught_up?`<div class="notice">Loading history: ${o.processed_count.toLocaleString()} of ${o.recording.sample_count.toLocaleString()} samples processed. Statistics below are provisional.</div>`:''}<div id="session-panel" role="tabpanel" aria-labelledby="tab-${ui.tab}">${ui.tab==='summary'?summary(o):ui.tab==='analytics'?analytics(o):setup(o)}</div>`:empty(s.loading?'Connecting to your recordings…':s.error?'Viewer unavailable':s.library.length?'No matching recording':'Ready for your first drive',s.loading?'Reading the local database.':s.error?'Start or restart the viewer command, then retry.':s.library.length?'Choose another circuit or car.':'Start iracing_local.py with the simulator open, then drive on track. Your new recording will appear here automatically.')}<footer class="main-footer"><span>APEX / SESSION STUDIO</span><span>Actual local recordings · No demo substitution</span></footer></div></main>`;
-  bind();
-  if(focus)document.getElementById(focus)?.focus({preventScroll:true});
-  if(scroll!==undefined&&document.querySelector('#lap-scroll'))document.querySelector('#lap-scroll').scrollTop=scroll;
-  if(libraryScroll!==undefined)document.querySelector('.sidebar').scrollTop=libraryScroll;
+function render(){
+ const s=client.state,o=s.overview,scroll=document.querySelector('.sidebar')?.scrollTop;
+ app.innerHTML=`${sidebar()}<main id="main" tabindex="-1"><header class="topbar"><div class="breadcrumb">WORKSPACE <span>Session review</span></div><span class="demo-badge ${s.error?'error-badge':''}">${s.error?'CONNECTION INTERRUPTED':s.loading?'LOADING':'SESSION REVIEW'}</span></header><div class="main-content">${s.error?`<div class="notice" role="status">${esc(s.error)}<button id="retry" class="small-select">Retry</button></div>`:''}${o?`<div class="session-header"><div><div class="eyebrow">${esc(date(o.recording.started_at))} · ${esc(clock(o.recording.started_at))} · ${esc(o.recording.status)}</div><h1>${esc(o.track.name)} <span class="layout-tag">${esc(o.track.layout)}</span></h1><div class="car-subtitle">${esc(o.car.name)} / ${esc(o.track.country)}</div></div></div><div class="tabbar"><div role="tablist" aria-label="Session views">${['summary','analytics','setup'].map(tab=>`<button class="tab ${ui.tab===tab?'active':''}" id="tab-${tab}" data-tab="${tab}" role="tab" aria-controls="session-panel" aria-selected="${ui.tab===tab}" tabindex="${ui.tab===tab?0:-1}">${tab[0].toUpperCase()+tab.slice(1)}</button>`).join('')}</div><span class="preview-label">Recorded data · On demand</span></div><div id="session-panel" role="tabpanel" aria-labelledby="tab-${ui.tab}">${ui.tab==='summary'?summary(o):ui.tab==='analytics'?analytics(o):setup(o)}</div>`:empty(s.loading?'Loading recordings…':s.error?'Viewer unavailable':'No recordings for this date',s.loading?'Reading your local session library.':s.error?'Check the viewer terminal, then retry.':'Choose another date, or record a stint and refresh this page.')}<footer class="main-footer"><span>APEX / SESSION STUDIO</span><span>After-session analysis</span></footer></div></main>`;
+ bind();if(scroll!==undefined)document.querySelector('.sidebar').scrollTop=scroll;
 }
-function bind() {
-  document.querySelector('#track-select').onchange=event=>client.selectFilter('trackId',event.target.value);
-  document.querySelector('#car-select').onchange=event=>client.selectFilter('carId',event.target.value);
-  document.querySelectorAll('[data-recording]').forEach(button=>button.onclick=()=>client.selectRecording(button.dataset.recording));
-  document.querySelector('#load-older')?.addEventListener('click',()=>{client.state.libraryLimit+=100;client.refresh();});
-  document.querySelector('#retry')?.addEventListener('click',()=>client.refresh());
-  document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{ui.tab=button.dataset.tab;render();document.querySelector(`#tab-${ui.tab}`).focus();});
-  document.querySelector('[role=tablist]')?.addEventListener('keydown',event=>{
-    const tabs=['summary','analytics','setup'];let i=tabs.indexOf(ui.tab);
-    if(event.key==='ArrowRight')i=(i+1)%3;else if(event.key==='ArrowLeft')i=(i+2)%3;else if(event.key==='Home')i=0;else if(event.key==='End')i=2;else return;
-    event.preventDefault();ui.tab=tabs[i];render();document.querySelector(`#tab-${ui.tab}`).focus();
-  });
-  document.querySelector('#lap-filter')?.addEventListener('change',event=>{ui.filter=event.target.value;render();});
-  document.querySelectorAll('[data-lap]').forEach(button=>button.onclick=()=>{client.state.lapId=button.dataset.lap;client.state.followLap=false;ui.tab='analytics';client.state.traces={selected:null,reference:null};client.refresh();});
-  for(const [id,key] of [['selected-lap','lapId'],['reference-lap','referenceId']])document.getElementById(id)?.addEventListener('change',event=>{client.state[key]=event.target.value;if(key==='lapId')client.state.followLap=false;client.state.traces={selected:null,reference:null};client.refresh();});
-  document.querySelector('#follow-lap')?.addEventListener('change',event=>{client.state.followLap=event.target.checked;client.refresh();});
-  document.querySelector('#setup-snapshot')?.addEventListener('change',event=>{client.state.snapshotId=Number(event.target.value);client.state.followSnapshot=false;render();});
-  document.querySelector('#follow-snapshot')?.addEventListener('change',event=>{client.state.followSnapshot=event.target.checked;client.refresh();});
-  document.querySelector('#compare-setup')?.addEventListener('change',event=>{ui.compare=event.target.checked;render();});
-  if(ui.tab==='analytics'&&document.querySelector('#distance-cursor')) {
-    const a=displayTrace(client.state.traces.selected),b=displayTrace(client.state.traces.reference);
-    const inspect=x=>{
-      ui.cursor=Math.max(0,Math.min(1,x));const selected=nearest(a,ui.cursor),reference=nearest(b,ui.cursor);
-      const length=client.state.overview?.track.length_km;
-      document.querySelector('#distance-value').textContent=`${show(ui.cursor*100)}%${finite(length)?` · ${show(ui.cursor*length,3)} km`:''}`;
-      document.querySelector('#distance-cursor').value=Math.round(ui.cursor*1000);
-      for(const key of ['speed','throttle','brake']) {
-        document.querySelector(`[data-live="${key}"]`).textContent=show(selected?.[key]);
-        document.querySelector(`[data-reference="${key}"]`).textContent=show(reference?.[key]);
-      }
-      document.querySelectorAll('.crosshair').forEach(line=>{line.setAttribute('x1',54+ui.cursor*842);line.setAttribute('x2',54+ui.cursor*842);});
-    };
-    document.querySelector('#distance-cursor').oninput=event=>inspect(Number(event.target.value)/1000);
-    document.querySelector('#distance-cursor').onpointerdown=()=>{ui.dragging=true;};
-    document.querySelectorAll('[data-trace]').forEach(svg=>svg.onpointermove=event=>{const r=svg.getBoundingClientRect();inspect(((event.clientX-r.left)/r.width*920-54)/842);});
-    inspect(ui.cursor);
-  }
+function bind(){
+ document.querySelector('#recording-date').onchange=e=>{if(e.target.value)client.selectFilter('date',e.target.value);};
+ document.querySelector('#track-select').onchange=e=>client.selectFilter('trackId',e.target.value);
+ document.querySelector('#car-select').onchange=e=>client.selectFilter('carId',e.target.value);
+ document.querySelectorAll('[data-recording]').forEach(b=>b.onclick=()=>client.selectRecording(b.dataset.recording));
+ document.querySelector('#load-older')?.addEventListener('click',()=>{client.state.libraryLimit+=100;client.refresh();});
+ document.querySelector('#retry')?.addEventListener('click',()=>client.refresh());
+ document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{ui.tab=b.dataset.tab;render();document.querySelector(`#tab-${ui.tab}`).focus();});
+ document.querySelector('[role=tablist]')?.addEventListener('keydown',e=>{const tabs=['summary','analytics','setup'];let i=tabs.indexOf(ui.tab);if(e.key==='ArrowRight')i=(i+1)%3;else if(e.key==='ArrowLeft')i=(i+2)%3;else if(e.key==='Home')i=0;else if(e.key==='End')i=2;else return;e.preventDefault();ui.tab=tabs[i];render();document.querySelector(`#tab-${ui.tab}`).focus();});
+ document.querySelectorAll('[data-lap]').forEach(b=>b.onclick=()=>{client.state.lapId=b.dataset.lap;client.state.selectedStint='all';client.state.selectedCondition='all';ui.tab='analytics';client.refresh(false);});
+ for(const [id,key] of [['selected-lap','lapId'],['reference-lap','referenceId']])document.getElementById(id)?.addEventListener('change',e=>{client.state[key]=e.target.value;client.refresh(false);});
+ for(const side of ['selected','reference'])for(const [suffix,key] of [['stint','Stint'],['condition','Condition']])document.querySelector(`#${side}-${suffix}`)?.addEventListener('change',e=>{client.state[side+key]=e.target.value;client.refresh(false);});
+ document.querySelector('#sector-focus')?.addEventListener('change',e=>{const s=client.state;s.focus=e.target.value;if(s.focus==='custom'){render();return;}const sector=s.overview.sectors?.find(item=>String(item.number)===s.focus);s.rangeStart=sector?.start??0;s.rangeEnd=sector?.end??1;ui.cursor=s.rangeStart;client.refresh(false);});
+ document.querySelector('#apply-range')?.addEventListener('click',()=>{const start=Number(document.querySelector('#range-start').value)/100,end=Number(document.querySelector('#range-end').value)/100;if(!(0<=start&&start<end&&end<=1)){document.querySelector('#range-message').textContent='Choose a start below the end, between 0% and 100%.';return;}client.state.rangeStart=start;client.state.rangeEnd=end;ui.cursor=start;client.refresh(false);});
+ document.querySelector('#setup-snapshot')?.addEventListener('change',e=>{client.state.snapshotId=Number(e.target.value);render();});
+ document.querySelector('#compare-setup')?.addEventListener('change',e=>{ui.compare=e.target.checked;render();});
+ if(ui.tab==='analytics'&&document.querySelector('#distance-cursor')){
+  const a=displayTrace(client.state.traces.selected),b=displayTrace(client.state.traces.reference),{rangeStart:start,rangeEnd:end}=client.state;
+  const inspect=x=>{ui.cursor=Math.max(start,Math.min(end,x));const selected=nearest(a,ui.cursor),reference=nearest(b,ui.cursor),fraction=(ui.cursor-start)/(end-start);
+   document.querySelector('#distance-value').textContent=`${show(ui.cursor*100)}%`;
+   document.querySelector('#distance-cursor').value=Math.round(fraction*1000);
+   for(const key of ['speed','throttle','brake','steering']){document.querySelector(`[data-live="${key}"]`).textContent=show(selected?.[key]);document.querySelector(`[data-reference="${key}"]`).textContent=show(reference?.[key]);}
+   document.querySelector('#selected-gear').textContent=gearLabel(selected?.gear);document.querySelector('#reference-gear').textContent=gearLabel(reference?.gear);
+   document.querySelectorAll('.crosshair').forEach(line=>{line.setAttribute('x1',54+fraction*842);line.setAttribute('x2',54+fraction*842);});
+  };
+  document.querySelector('#distance-cursor').oninput=e=>inspect(start+Number(e.target.value)/1000*(end-start));
+  document.querySelectorAll('[data-trace]').forEach(svg=>svg.onpointermove=e=>{const r=svg.getBoundingClientRect();inspect(start+((e.clientX-r.left)/r.width*920-54)/842*(end-start));});inspect(ui.cursor);
+ }
 }
-render();
-client.refresh();
+render();client.refresh();

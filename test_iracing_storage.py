@@ -193,7 +193,7 @@ os._exit(9)
                 with patch('iracing_local.irsdk.IRSDK', return_value=sdk), \
                      patch('iracing_local.header_catalog', return_value=CATALOG), \
                      patch('iracing_local.raw_session_info', return_value=RAW_A), \
-                     patch('iracing_local.read_selected_variables', return_value=({'IsOnTrack': True, 'IsOnTrackCar': True}, [])):
+                     patch('iracing_local.read_selected_variables', return_value=({'IsOnTrack': True, 'IsOnTrackCar': True, 'IsInGarage': False, 'OnPitRoad': False}, [])):
                     if status == 'failed':
                         with self.assertRaisesRegex(RuntimeError, 'SDK failure'):
                             capture(self.root / status, profile, database=self.db)
@@ -393,7 +393,7 @@ os._exit(9)
         sdk.startup = startup
         profile = self.root / 'profile.json'
         profile.write_text(encode(PROFILE), encoding='utf-8')
-        values = {'IsOnTrack': True, 'IsOnTrackCar': True, 'Speed': 13}
+        values = {'IsOnTrack': True, 'IsOnTrackCar': True, 'IsInGarage': False, 'OnPitRoad': False, 'Speed': 13}
         with patch('iracing_local.irsdk.IRSDK', return_value=sdk), \
              patch('iracing_local.time.sleep'), \
              patch('iracing_local.header_catalog', return_value=CATALOG), \

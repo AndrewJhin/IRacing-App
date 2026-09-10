@@ -53,7 +53,8 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
             url = urlsplit(self.path)
             if url.path in assets:
                 filename, content_type = assets[url.path]
-                directory = frontend / 'dist' if (frontend / 'dist' / 'index.html').is_file() else frontend
+                # Source assets run directly; stale optional builds must not mask updates.
+                directory = frontend
                 try:
                     data = (directory / filename).read_bytes()
                 except OSError:
@@ -85,8 +86,9 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
             try:
                 with Store(database, readonly=True) as store:
                     if parts == ['api', 'v1', 'library']:
-                        allowed('limit', 'offset')
-                        body = library(store, limit=get('limit', 100, int), offset=get('offset', 0, int))
+                        allowed('limit', 'offset', 'from', 'until')
+                        body = library(store, limit=get('limit', 100, int), offset=get('offset', 0, int),
+                                       started_from=get('from', convert=float), started_until=get('until', convert=float))
                     elif parts == ['api', 'v1', 'recordings']:
                         allowed('limit', 'offset')
                         body = {'items': store.list_recordings(limit=get('limit', 100, int), offset=get('offset', 0, int))}
@@ -103,11 +105,12 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
                             allowed()
                             body = viewer.overview(store, recording_id)
                         elif parts[4] == 'trace':
-                            allowed('start', 'end', 'limit')
+                            allowed('start', 'end', 'limit', 'start_pct', 'end_pct')
                             start, end = get('start', convert=int), get('end', convert=int)
                             if start is None or end is None:
                                 raise ValueError('start and end are required')
-                            body = trace(store, recording_id, start, end, get('limit', 1200, int))
+                            body = trace(store, recording_id, start, end, get('limit', 1200, int),
+                                         get('start_pct', 0.0, float), get('end_pct', 1.0, float))
                         elif parts[4] == 'samples':
                             allowed('after', 'limit', 'channels', 'stint_id', 'session_num', 'lap', 'time_min', 'time_max')
                             channels = get('channels')
@@ -142,6 +145,7 @@ def serve(database: Path, port: int = 8765) -> None:
     with Store(database):
         pass
     with create_server(database, port) as server:
+        print(f'Database: {database.resolve()}', flush=True)
         print(f'Session Studio: http://127.0.0.1:{server.server_port}/', flush=True)
         print(f'Read-only storage API: http://127.0.0.1:{server.server_port}/api/v1/recordings', flush=True)
         try:
