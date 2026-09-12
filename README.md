@@ -25,17 +25,21 @@ Run these in separate terminals. The viewer prints its database path and URL. Pr
 
 ## After-session review
 
-Choose a recording date (defaults to today), circuit, car and recording. Full names are shown beneath the selectors and wrap in recording cards. The viewer loads on page refresh and explicit user selections; there is no recurring polling. Long histories finish loading within the same request sequence.
+Session Finder is the landing page. It shows at most five recent sessions across all dates, plus circuit/car/date/text search. An empty archive shows no cards. Search is paginated in batches of 20; filters narrow the actual results, including matches beyond the first page. Choose both circuit and car to open a search result. Opening a recent session explicitly selects its recorded circuit/car pair for you. Sessions without identified circuit/car metadata cannot open review.
+
+The viewer uses “session” in its UI; existing database recording IDs and capture formats remain unchanged. Date is optional and uses local midnight boundaries. Search accepts circuit/car names, layout, status or a session ID. Returning to Finder preserves the search. There is no recurring polling.
 
 Summary shows clean lap best/average, lap history, and estimated sector bests/averages. The sector count and boundaries come from each recording's `SplitTimeInfo.Sectors`. Timing uses linear interpolation only between consecutive, gap-free telemetry samples at those boundaries, plus SDK lap timing at the finish. Only fully observed laps with known incident data, no incidents, no pit visit and no gaps contribute. Missing boundaries/timing remain unavailable; no assumption of three sectors is made.
 
-Analytics has independent stint and condition filters for selected/reference laps, sector or custom distance zoom, speed/throttle/brake/steering traces, and both gears at the distance cursor. Steering is converted from radians to degrees. Named corner boundaries are not present in the captured session metadata; use a custom distance range to inspect a corner.
+Summary retains the session metrics and adds the all-time clean best across saved sessions for the exact circuit layout and car. Analytics can compare a lap from this session, that all-time best, or the average of every clean complete lap in the selected session on either side. Average traces align laps by distance and weight each lap equally. A channel is blank where any included lap lacks coverage; gear is the mode of recorded gears, never a fractional average. Average-speed metrics calculate time-weighted speed per lap in the displayed range, then weight those lap averages equally. Stint and condition filters apply to individual session laps, not to the all-clean-lap composite.
+
+Analytics retains independent stint/condition filters, sector/custom distance zoom, speed/throttle/brake/steering traces and both gears at the cursor. The Stints tab compares clean-lap best/average and incident/partial counts without another data fetch. Steering is converted from radians to degrees. Named corner boundaries are not present in the captured session metadata; use a custom distance range to inspect a corner.
 
 A new stint starts on pit exit and ends on pit entry or leaving the car. Starting capture while already driving creates a partial initial stint. A simulator session change also closes the prior stint. Garage/pit ticks never open a stint. The starting setup is captured once per stint and reused by every telemetry sample. Setup review selects a stint and can compare it with the previous stint. Existing recordings are retained and use the earliest setup snapshot of each historical stint; historical stint boundaries are not rewritten.
 
 ## Session Studio frontend
 
-Select a circuit, car and recording, then use **Summary**, **Analytics** and **Setup** to explore observed lap pace, compare recorded speed/throttle/brake traces and inspect car-specific setup snapshots. Analytics filters each comparison by stint and condition; Setup selects the starting setup for a stint.
+Select a circuit, car and recording, then use **Summary**, **Analytics** and **Setup** to explore observed lap pace, compare recorded speed/throttle/brake traces and inspect car-specific setup snapshots. Analytics supports session laps, the all-time clean best and clean-lap composites; Setup selects the starting setup for a stint.
 
 ```powershell
 .\.venv\Scripts\python.exe -m iracing_storage serve
@@ -112,3 +116,10 @@ Run offline tests with:
 ```
 
 This local feed is for the active simulator session; use `iracing_client.py` for account data and historical web API endpoints.
+
+
+## On-demand loading and caching
+
+Finder reads only session metadata and sends five recent cards plus one page of matching results, not telemetry. Opening a session calls its `/review` endpoint, which returns its summary and the matching all-time best descriptor. The first benchmark lookup derives clean-lap summaries for matching saved sessions on the backend; it may take longer for a large archive. Parsed identities and benchmark candidates are cached until their source changes. Detailed summaries use a 64-session LRU cache; average traces use a 16-entry cache. Caches are local to the running viewer and rebuild after restart.
+
+Telemetry is requested only on entering Analytics or changing a comparison/range. Setup payloads are requested only on entering Setup. The client caches comparisons, combines duplicate requests and cancels obsolete requests. The new `/api/v1/finder`, `/recordings/{id}/review`, `/comparison` and `/stint-setups` endpoints preserve the same local-only, read-only access rules as the existing API. No telemetry, setup or database migration is required for this update.

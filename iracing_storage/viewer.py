@@ -115,6 +115,10 @@ class Accumulator:
                 old['complete'] = bool(crossing and old['start_observed'] and old['seconds'] is not None)
                 # The boundary sample may be the first report of an incident at the finish.
                 incident = number(values.get('PlayerCarMyIncidentCount'))
+                if crossing:
+                    old['incident_known'] &= incident is not None
+                    if incident is not None and old['incident_end'] is not None:
+                        old['gap'] |= incident < old['incident_end']
                 if incident is not None and old['incident_end'] is not None and incident > old['incident_end']:
                     old['incident'] = True
             distance, elapsed = number(sample['lap_distance']), number(values.get('LapCurrentLapTime'))
@@ -210,7 +214,7 @@ class Viewer:
         self.cache = OrderedDict()
         self.lock = threading.RLock()
 
-    def overview(self, store, recording_id):
+    def overview(self, store, recording_id, *, complete=False, include_setups=True):
         with self.lock:
             # A read transaction gives the row count and stream the same committed snapshot.
             with store.connection:
@@ -226,7 +230,7 @@ class Viewer:
                 while len(self.cache) > 8:
                     self.cache.popitem(last=False)
                 rows = store.connection.execute(
-                    'SELECT * FROM samples WHERE recording_id=? AND sequence>? ORDER BY sequence LIMIT 25000',
+                    'SELECT * FROM samples WHERE recording_id=? AND sequence>? ORDER BY sequence' + ('' if complete else ' LIMIT 25000'),
                     (recording_id, accumulator.sequence))
                 for row in rows:
                     sample = dict(row)
@@ -239,7 +243,7 @@ class Viewer:
                 for row in store.connection.execute(
                     'SELECT id,stint_id,captured_at,setup_json,parse_error,provenance FROM snapshots '
                     'WHERE id IN (SELECT min(id) FROM snapshots WHERE recording_id=? GROUP BY stint_id) ORDER BY id',
-                    (recording_id,)):
+                    (recording_id,)) if include_setups else []:
                     setup = dict(row)
                     setup['setup'] = json.loads(setup.pop('setup_json'))
                     setups.append(setup)

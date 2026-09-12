@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .database import Store, encode
 from .viewer import Viewer, library, trace
+from .analysis import Analysis
 
 
 def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
@@ -17,6 +18,7 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
     with Store(database, readonly=True):
         pass
     viewer = Viewer()
+    analysis = Analysis(viewer)
     frontend = Path(__file__).resolve().parents[1] / 'frontend'
     assets = {'/': ('index.html', 'text/html; charset=utf-8'),
               '/index.html': ('index.html', 'text/html; charset=utf-8'),
@@ -85,7 +87,12 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
 
             try:
                 with Store(database, readonly=True) as store:
-                    if parts == ['api', 'v1', 'library']:
+                    if parts == ['api', 'v1', 'finder']:
+                        allowed('track', 'car', 'q', 'from', 'until', 'offset', 'limit')
+                        body = analysis.finder(store, track=get('track'), car=get('car'), query=get('q', ''),
+                                               started_from=get('from', convert=float), started_until=get('until', convert=float),
+                                               offset=get('offset', 0, int), limit=get('limit', 20, int))
+                    elif parts == ['api', 'v1', 'library']:
                         allowed('limit', 'offset', 'from', 'until')
                         body = library(store, limit=get('limit', 100, int), offset=get('offset', 0, int),
                                        started_from=get('from', convert=float), started_until=get('until', convert=float))
@@ -97,10 +104,21 @@ def create_server(database: Path, port: int = 8765) -> ThreadingHTTPServer:
                         body = {'items': store.documents(kind=get('kind'), limit=get('limit', 100, int), offset=get('offset', 0, int))}
                     elif len(parts) in (4, 5) and parts[:3] == ['api', 'v1', 'recordings']:
                         recording_id = parts[3]
-                        recording = store.recording(recording_id)
+                        if not store.connection.execute('SELECT 1 FROM recordings WHERE id=?', (recording_id,)).fetchone():
+                            raise KeyError(recording_id)
                         if len(parts) == 4:
                             allowed()
-                            body = recording
+                            body = store.recording(recording_id)
+                        elif parts[4] == 'review':
+                            allowed()
+                            body = analysis.review(store, recording_id)
+                        elif parts[4] == 'stint-setups':
+                            allowed()
+                            body = analysis.setups(store, recording_id)
+                        elif parts[4] == 'comparison':
+                            allowed('source', 'lap_id', 'start_pct', 'end_pct')
+                            body = analysis.comparison(store, recording_id, source=get('source', 'lap'), lap_id=get('lap_id'),
+                                                       start=get('start_pct', 0.0, float), end=get('end_pct', 1.0, float))
                         elif parts[4] == 'overview':
                             allowed()
                             body = viewer.overview(store, recording_id)
