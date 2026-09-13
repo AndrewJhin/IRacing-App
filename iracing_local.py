@@ -79,7 +79,12 @@ def raw_session_info(ir: Any) -> str:
     """Read the complete raw SessionInfo YAML from pyirsdk's shared memory."""
     header = ir._header
     raw = ir._shared_mem[header.session_info_offset : header.session_info_offset + header.session_info_len]
-    encoding = "utf-8" if ir.is_session_info_utf8 else "cp1252"
+    is_utf8 = getattr(ir, "is_session_info_utf8", None)
+    if is_utf8 is None:
+        # Older pyirsdk releases lack this property. Use the same SessionInfo
+        # encoding marker as the SDK instead of assuming Windows text encoding.
+        is_utf8 = raw.startswith(b"---\nWeekendInfo:\n Encoding: UTF8")
+    encoding = "utf-8" if is_utf8 else "cp1252"
     return raw.rstrip(b"\x00").decode(encoding, errors="replace")
 
 
